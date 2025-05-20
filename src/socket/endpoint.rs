@@ -1,6 +1,6 @@
 // use core::marker::PhantomData;
 use core::cell::UnsafeCell;
-use std::{any::TypeId, marker::PhantomData, pin::Pin, ptr::NonNull};
+use std::{any::TypeId, future::poll_fn, marker::PhantomData, pin::Pin, ptr::NonNull, task::{Context, Poll, Waker}};
 
 use cordyceps::list::Links;
 use mutex::ScopedRawMutex;
@@ -11,9 +11,29 @@ use crate::{Address, NetStack};
 use super::{SocketHeader, SocketVTable};
 
 pub struct OwnedMessage<T: 'static> {
-    src: Address,
-    dst: Address,
-    t: T,
+    pub src: Address,
+    pub dst: Address,
+    pub t: T,
+}
+
+struct OneBox<T: 'static> {
+    wait: Option<Waker>,
+    t: Option<OwnedMessage<T>>
+}
+
+impl<T: 'static> OneBox<T> {
+    const fn new() -> Self {
+        Self {
+            wait: None,
+            t: None,
+        }
+    }
+}
+
+impl<T: 'static> Default for OneBox<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // Owned Endpoint Server Socket
@@ -23,7 +43,7 @@ pub struct OwnedSocket<T: Serialize + DeserializeOwned + 'static> {
     hdr: SocketHeader,
     // TODO: just a single item, we probably want a more ring-buffery
     // option for this.
-    _t: UnsafeCell<Option<OwnedMessage<T>>>,
+    inner: UnsafeCell<OneBox<T>>,
 }
 
 pub struct OwnedSocketHdl<'a, T, R>
@@ -34,6 +54,37 @@ where
     ptr: NonNull<OwnedSocket<T>>,
     _lt: PhantomData<&'a OwnedSocket<T>>,
     net: &'static NetStack<R>,
+}
+
+// TODO: impl drop, remove waker, remove socket
+impl<T, R> OwnedSocketHdl<'_, T, R>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+    pub async fn recv(&mut self) -> OwnedMessage<T> {
+        poll_fn(|cx: &mut Context<'_>| {
+            let res = self.net.inner.with_lock(|_net| {
+                let this_ref: &OwnedSocket<T> = unsafe { self.ptr.as_ref() };
+                let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
+                if let Some(t) = box_ref.t.take() {
+                    Some(t)
+                } else {
+                    // todo
+                    assert!(box_ref.wait.is_none());
+                    // NOTE: Okay to register waker AFTER checking, because we
+                    // have an exclusive lock
+                    box_ref.wait = Some(cx.waker().clone());
+                    None
+                }
+            });
+            if let Some(t) = res {
+                Poll::Ready(t)
+            } else {
+                Poll::Pending
+            }
+        }).await
+    }
 }
 
 impl<T> OwnedSocket<T>
@@ -48,7 +99,7 @@ where
                 kty: [0u8; 8], // TODO: generic over E: Endpoint
                 port: UnsafeCell::new(0),
             },
-            _t: UnsafeCell::new(None),
+            inner: UnsafeCell::new(OneBox::new()),
         }
     }
 
@@ -91,17 +142,20 @@ where
         let that: NonNull<T> = that.cast();
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut Option<OwnedMessage<T>> = unsafe { &mut *this._t.get() };
+        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.is_some() {
+        if mutitem.t.is_some() {
             return Err(());
         }
 
-        *mutitem = Some(OwnedMessage {
+        mutitem.t = Some(OwnedMessage {
             src,
             dst,
             t: unsafe { that.read() },
         });
+        if let Some(w) = mutitem.wait.take() {
+            w.wake();
+        }
 
         Ok(())
     }
@@ -119,14 +173,17 @@ where
     fn send_raw(this: NonNull<()>, that: &[u8], dst: Address, src: Address) -> Result<(), ()> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut Option<OwnedMessage<T>> = unsafe { &mut *this._t.get() };
+        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.is_some() {
+        if mutitem.t.is_some() {
             return Err(());
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
-            *mutitem = Some(OwnedMessage { src, dst, t });
+            mutitem.t = Some(OwnedMessage { src, dst, t });
+            if let Some(w) = mutitem.wait.take() {
+                w.wake();
+            }
             Ok(())
         } else {
             Err(())
