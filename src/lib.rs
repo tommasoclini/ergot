@@ -80,20 +80,25 @@ where
         let mut t = ManuallyDrop::new(t);
 
         let res = self.inner.with_lock(|inner| {
-            for socket in inner.sockets.iter_mut() {
-                let port = unsafe { *socket.port.get() };
+            for socket in inner.sockets.raw_iter() {
+                let (port, vtable, skt_key) = unsafe {
+                    let skt_ref = socket.as_ref();
+                    let port = *skt_ref.port.get();
+                    let vtable = skt_ref.vtable.clone();
+                    (port, vtable, skt_ref.key)
+                };
                 // TODO: only allow port_id == 0 if there is only one matching port
                 // with this key.
                 // TODO: some kind of distinction of ports that have reasonable return
                 // addrs? Should addr just carry the key?
-                if (port == dst.port_id || dst.port_id == 0) && key == socket.key {
-                    let res = if let Some(f) = socket.vtable.send_owned {
-                        let this: NonNull<SocketHeader> = NonNull::from(unsafe { socket.get_unchecked_mut() });
+                if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
+                    let res = if let Some(f) = vtable.send_owned {
+                        let this: NonNull<SocketHeader> = socket;
                         let this: NonNull<()> = this.cast();
                         let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
                         let that: NonNull<()> = that.cast();
                         (f)(this, that, &TypeId::of::<T>(), src, dst)
-                    } else if let Some(_f) = socket.vtable.send_bor {
+                    } else if let Some(_f) = vtable.send_bor {
                         todo!()
                     } else {
                         // keep going?
@@ -123,8 +128,12 @@ where
                 inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
                 let exists = inner
                     .sockets
-                    .iter()
-                    .any(|s| unsafe { *s.port.get() } == inner.port_ctr);
+                    .raw_iter()
+                    .any(|s| {
+                        let skt_ref = unsafe { s.as_ref() };
+                        let port = unsafe { *skt_ref.port.get() };
+                        port == inner.port_ctr
+                    });
                 if !exists {
                     break;
                 } else if inner.port_ctr == start {

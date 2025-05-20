@@ -58,6 +58,7 @@ pub type SendRaw = fn(
     Address,
 ) -> Result<(), ()>;
 
+#[derive(Clone)]
 pub struct SocketVTable {
     pub(crate) send_owned: Option<SendOwned>,
     pub(crate) send_bor: Option<SendBorrowed>,
