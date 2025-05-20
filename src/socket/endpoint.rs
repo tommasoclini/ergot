@@ -4,12 +4,14 @@ use std::{any::TypeId, future::poll_fn, marker::PhantomData, pin::Pin, ptr::NonN
 
 use cordyceps::list::Links;
 use mutex::ScopedRawMutex;
+use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Address, NetStack};
 
 use super::{SocketHeader, SocketVTable};
 
+#[derive(Debug, PartialEq)]
 pub struct OwnedMessage<T: 'static> {
     pub src: Address,
     pub dst: Address,
@@ -38,35 +40,41 @@ impl<T: 'static> Default for OneBox<T> {
 
 // Owned Endpoint Server Socket
 #[repr(C)]
-pub struct OwnedSocket<T: Serialize + DeserializeOwned + 'static> {
+pub struct OwnedSocket<E>
+where
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static
+{
     // LOAD BEARING: must be first
     hdr: SocketHeader,
     // TODO: just a single item, we probably want a more ring-buffery
     // option for this.
-    inner: UnsafeCell<OneBox<T>>,
+    inner: UnsafeCell<OneBox<E::Request>>,
 }
 
-pub struct OwnedSocketHdl<'a, T, R>
+pub struct OwnedSocketHdl<'a, E, R>
 where
-    T: Serialize + DeserializeOwned + 'static,
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-    ptr: NonNull<OwnedSocket<T>>,
-    _lt: PhantomData<&'a OwnedSocket<T>>,
+    ptr: NonNull<OwnedSocket<E>>,
+    _lt: PhantomData<&'a OwnedSocket<E>>,
     net: &'static NetStack<R>,
 }
 
 // TODO: impl drop, remove waker, remove socket
-impl<T, R> OwnedSocketHdl<'_, T, R>
+impl<E, R> OwnedSocketHdl<'_, E, R>
 where
-    T: Serialize + DeserializeOwned + 'static,
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-    pub async fn recv(&mut self) -> OwnedMessage<T> {
+    pub async fn recv(&mut self) -> OwnedMessage<E::Request> {
         poll_fn(|cx: &mut Context<'_>| {
             let res = self.net.inner.with_lock(|_net| {
-                let this_ref: &OwnedSocket<T> = unsafe { self.ptr.as_ref() };
-                let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
+                let this_ref: &OwnedSocket<E> = unsafe { self.ptr.as_ref() };
+                let box_ref: &mut OneBox<E::Request> = unsafe { &mut *this_ref.inner.get() };
                 if let Some(t) = box_ref.t.take() {
                     Some(t)
                 } else {
@@ -87,16 +95,17 @@ where
     }
 }
 
-impl<T> OwnedSocket<T>
+impl<E> OwnedSocket<E>
 where
-    T: Serialize + DeserializeOwned + 'static,
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static,
 {
     pub const fn new() -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
                 vtable: Self::vtable(),
-                kty: [0u8; 8], // TODO: generic over E: Endpoint
+                key: E::REQ_KEY,
                 port: UnsafeCell::new(0),
             },
             inner: UnsafeCell::new(OneBox::new()),
@@ -106,7 +115,7 @@ where
     pub fn attach<'a, R: ScopedRawMutex + 'static>(
         self: Pin<&'a mut Self>,
         stack: &'static NetStack<R>,
-    ) -> OwnedSocketHdl<'a, T, R> {
+    ) -> OwnedSocketHdl<'a, E, R> {
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         unsafe {
@@ -132,17 +141,17 @@ where
         this: NonNull<()>,
         that: NonNull<()>,
         ty: &TypeId,
-        dst: Address,
         src: Address,
+        dst: Address,
     ) -> Result<(), ()> {
-        if &TypeId::of::<T>() != ty {
+        if &TypeId::of::<E::Request>() != ty {
             debug_assert!(false, "Type Mismatch!");
             return Err(());
         }
-        let that: NonNull<T> = that.cast();
+        let that: NonNull<E::Request> = that.cast();
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut OneBox<E::Request> = unsafe { &mut *this.inner.get() };
 
         if mutitem.t.is_some() {
             return Err(());
@@ -163,8 +172,8 @@ where
     // fn send_bor(
     //     this: NonNull<()>,
     //     that: NonNull<()>,
-    //     dst: Address,
     //     src: Address,
+    //     dst: Address,
     // ) -> Result<(), ()> {
     //     // I don't think we can support this?
     //     Err(())
@@ -173,13 +182,13 @@ where
     fn send_raw(this: NonNull<()>, that: &[u8], dst: Address, src: Address) -> Result<(), ()> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut OneBox<E::Request> = unsafe { &mut *this.inner.get() };
 
         if mutitem.t.is_some() {
             return Err(());
         }
 
-        if let Ok(t) = postcard::from_bytes::<T>(that) {
+        if let Ok(t) = postcard::from_bytes::<E::Request>(that) {
             mutitem.t = Some(OwnedMessage { src, dst, t });
             if let Some(w) = mutitem.wait.take() {
                 w.wake();
@@ -191,9 +200,10 @@ where
     }
 }
 
-impl<T> Default for OwnedSocket<T>
+impl<E> Default for OwnedSocket<E>
 where
-    T: Serialize + DeserializeOwned + 'static,
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static,
 {
     fn default() -> Self {
         Self::new()

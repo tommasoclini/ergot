@@ -3,6 +3,7 @@ use core::ptr::{self, NonNull};
 use std::cell::UnsafeCell;
 
 use cordyceps::{Linked, list::Links};
+use postcard_rpc::Key;
 
 use crate::Address;
 
@@ -10,7 +11,7 @@ pub mod endpoint;
 
 pub struct SocketHeader {
     pub(crate) links: Links<SocketHeader>,
-    pub(crate) kty: [u8; 8],
+    pub(crate) key: Key,
     pub(crate) port: UnsafeCell<u8>,
     pub(crate) vtable: SocketVTable, // &Vtable?
 }
@@ -39,9 +40,9 @@ pub type SendBorrowed = fn(
     NonNull<()>,
     // The T ptr
     NonNull<()>,
-    // The dst
-    Address,
     // the src
+    Address,
+    // The dst
     Address,
 ) -> Result<(), ()>;
 // Morally: it's a packet
@@ -51,16 +52,16 @@ pub type SendRaw = fn(
     NonNull<()>,
     // The packet
     &[u8],
-    // The dst
-    Address,
     // The src
+    Address,
+    // The dst
     Address,
 ) -> Result<(), ()>;
 
 pub struct SocketVTable {
-    send_owned: Option<SendOwned>,
-    send_bor: Option<SendBorrowed>,
-    send_raw: Option<SendRaw>,
+    pub(crate) send_owned: Option<SendOwned>,
+    pub(crate) send_bor: Option<SendBorrowed>,
+    pub(crate) send_raw: Option<SendRaw>,
 }
 
 // --------------------------------------------------------------------------

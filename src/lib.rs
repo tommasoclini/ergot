@@ -1,7 +1,10 @@
-use std::ptr::NonNull;
+#![allow(clippy::result_unit_err)]
+
+use std::{any::TypeId, mem::ManuallyDrop, ptr::NonNull};
 
 use cordyceps::List;
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
+use postcard_rpc::Key;
 use socket::SocketHeader;
 
 pub mod socket;
@@ -30,6 +33,7 @@ pub struct NetStack<R: ScopedRawMutex> {
     inner: BlockingMutex<R, NetStackInner>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Address {
     pub network_id: u16,
     pub node_id: u8,
@@ -61,6 +65,55 @@ impl<R> NetStack<R>
 where
     R: ScopedRawMutex,
 {
+    pub fn send_ty<T: 'static>(
+        &'static self,
+        src: Address,
+        dst: Address,
+        key: Key,
+        t: T,
+    ) -> Result<(), ()> {
+        // todo: real routing
+        assert_eq!(src.network_id, 0);
+        assert_eq!(dst.network_id, 0);
+        assert_eq!(src.node_id, 0);
+        assert_eq!(dst.node_id, 0);
+        let mut t = ManuallyDrop::new(t);
+
+        let res = self.inner.with_lock(|inner| {
+            for socket in inner.sockets.iter_mut() {
+                let port = unsafe { *socket.port.get() };
+                // TODO: only allow port_id == 0 if there is only one matching port
+                // with this key.
+                // TODO: some kind of distinction of ports that have reasonable return
+                // addrs? Should addr just carry the key?
+                if (port == dst.port_id || dst.port_id == 0) && key == socket.key {
+                    let res = if let Some(f) = socket.vtable.send_owned {
+                        let this: NonNull<SocketHeader> = NonNull::from(unsafe { socket.get_unchecked_mut() });
+                        let this: NonNull<()> = this.cast();
+                        let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
+                        let that: NonNull<()> = that.cast();
+                        (f)(this, that, &TypeId::of::<T>(), src, dst)
+                    } else if let Some(_f) = socket.vtable.send_bor {
+                        todo!()
+                    } else {
+                        // keep going?
+                        Err(())
+                    };
+                    return res;
+                }
+            }
+            Err(())
+        });
+
+        // If we didn't ever take the item, we need to drop it
+        if res.is_err() {
+            unsafe {
+                ManuallyDrop::drop(&mut t);
+            }
+        }
+
+        res
+    }
     pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) {
         self.inner.with_lock(|inner| {
             // TODO: smarter than this, do something like littlefs2's "next free block"
