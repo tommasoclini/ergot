@@ -65,6 +65,46 @@ impl<R> NetStack<R>
 where
     R: ScopedRawMutex,
 {
+    pub fn send_raw(
+        &'static self,
+        src: Address,
+        dst: Address,
+        key: Key,
+        body: &[u8],
+    ) -> Result<(), ()> {
+        // todo: real routing
+        assert_eq!(src.network_id, 0);
+        assert_eq!(dst.network_id, 0);
+        assert_eq!(src.node_id, 0);
+        assert_eq!(dst.node_id, 0);
+
+        self.inner.with_lock(|inner| {
+            for socket in inner.sockets.raw_iter() {
+                let (port, vtable, skt_key) = unsafe {
+                    let skt_ref = socket.as_ref();
+                    let port = *skt_ref.port.get();
+                    let vtable = skt_ref.vtable.clone();
+                    (port, vtable, skt_ref.key)
+                };
+                // TODO: only allow port_id == 0 if there is only one matching port
+                // with this key.
+                // TODO: some kind of distinction of ports that have reasonable return
+                // addrs? Should addr just carry the key?
+                if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
+                    let res = if let Some(f) = vtable.send_raw {
+                        let this: NonNull<SocketHeader> = socket;
+                        let this: NonNull<()> = this.cast();
+                        (f)(this, body, src, dst)
+                    } else {
+                        // keep going?
+                        Err(())
+                    };
+                    return res;
+                }
+            }
+            Err(())
+        })
+    }
     pub fn send_ty<T: 'static>(
         &'static self,
         src: Address,

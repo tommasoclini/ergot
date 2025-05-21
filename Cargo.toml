@@ -12,7 +12,7 @@ critical-section = { version = "1.2.0", features = ["std"] }
 mutex = { version = "1.0.0", features = ["std", "impl-critical-section"] }
 pin-project = "1.1.10"
 maitake-sync = { version = "0.2.1", features = ["std"] }
-postcard = "1.1.1"
+postcard = { version = "1.1.1", features = ["use-std"] }
 bbq2 = "0.1.0"
 serde = { version = "1.0", features = ["derive"] }
 postcard-rpc = "0.11.9"

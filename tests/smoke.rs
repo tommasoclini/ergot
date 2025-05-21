@@ -32,16 +32,30 @@ async fn hello() {
 
     let tsk = spawn(async {
         sleep(Duration::from_millis(100)).await;
-        // try sending, should fail
         let src = Address { network_id: 0, node_id: 0, port_id: 123 };
         let dst = Address { network_id: 0, node_id: 0, port_id: 0 };
+
+        // try sending, should fail
         STACK.send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }).unwrap_err();
+        // typed sending works
         STACK.send_ty::<Example>(src, dst, ExampleEndpoint::REQ_KEY, Example { a: 42, b: 789 }).unwrap();
+        // raw sending works
+        // (todo: wait a bit to free up space, we wont need this when we can
+        // hold more than one message at a time)
+        sleep(Duration::from_millis(100)).await;
+        let body = postcard::to_stdvec(&Example { a: 56, b: 1234 }).unwrap();
+        STACK.send_raw(src, dst, ExampleEndpoint::REQ_KEY, &body).unwrap();
     });
 
     let msg = hdl.recv().await;
     assert_eq!(Address { network_id: 0, node_id: 0, port_id: 123 }, msg.src);
     assert_eq!(Address { network_id: 0, node_id: 0, port_id: 0 }, msg.dst);
     assert_eq!(Example { a: 42, b: 789 }, msg.t);
+
+    let msg = hdl.recv().await;
+
+    assert_eq!(Address { network_id: 0, node_id: 0, port_id: 123 }, msg.src);
+    assert_eq!(Address { network_id: 0, node_id: 0, port_id: 0 }, msg.dst);
+    assert_eq!(Example { a: 56, b: 1234 }, msg.t);
     tsk.await.unwrap();
 }
