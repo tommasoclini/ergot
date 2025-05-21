@@ -79,7 +79,7 @@ where
         assert_eq!(dst.node_id, 0);
 
         self.inner.with_lock(|inner| {
-            for socket in inner.sockets.raw_iter() {
+            for socket in inner.sockets.iter_raw() {
                 let (port, vtable, skt_key) = unsafe {
                     let skt_ref = socket.as_ref();
                     let port = *skt_ref.port.get();
@@ -120,7 +120,7 @@ where
         let mut t = ManuallyDrop::new(t);
 
         let res = self.inner.with_lock(|inner| {
-            for socket in inner.sockets.raw_iter() {
+            for socket in inner.sockets.iter_raw() {
                 let (port, vtable, skt_key) = unsafe {
                     let skt_ref = socket.as_ref();
                     let port = *skt_ref.port.get();
@@ -168,10 +168,9 @@ where
                 inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
                 let exists = inner
                     .sockets
-                    .raw_iter()
+                    .iter()
                     .any(|s| {
-                        let skt_ref = unsafe { s.as_ref() };
-                        let port = unsafe { *skt_ref.port.get() };
+                        let port = unsafe { *s.port.get() };
                         port == inner.port_ctr
                     });
                 if !exists {
