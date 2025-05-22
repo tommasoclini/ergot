@@ -63,6 +63,9 @@ pub struct SocketVTable {
     pub(crate) send_owned: Option<SendOwned>,
     pub(crate) send_bor: Option<SendBorrowed>,
     pub(crate) send_raw: Option<SendRaw>,
+    // NOTE: We do *not* have a `drop` impl here, because the list
+    // doesn't ACTUALLY own the nodes, so it is not responsible for dropping
+    // them. They are naturally destroyed by their true owner.
 }
 
 // --------------------------------------------------------------------------

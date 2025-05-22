@@ -95,6 +95,30 @@ where
     }
 }
 
+impl<E, R> Drop for OwnedSocketHdl<'_, E, R>
+where
+    E: Endpoint,
+    E::Request: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+    fn drop(&mut self) {
+        // first things first, remove the item from the list
+        self.net.inner.with_lock(|net| {
+            let node: NonNull<OwnedSocket<E>> = self.ptr;
+            let node: NonNull<SocketHeader> = node.cast();
+            unsafe {
+                net.sockets.remove(node);
+            }
+        });
+        // now that we are NOT in the list, we can soundly drop the item storage
+        unsafe {
+            let mut node: NonNull<OwnedSocket<E>> = self.ptr;
+            let node_mut: &mut OwnedSocket<E> = node.as_mut();
+            core::ptr::drop_in_place(node_mut.inner.get());
+        }
+    }
+}
+
 impl<E> OwnedSocket<E>
 where
     E: Endpoint,
