@@ -64,13 +64,78 @@ where
     R: ScopedRawMutex + 'static,
 {
     pub(crate) ptr: NonNull<OwnedSocket<T>>,
-    _lt: PhantomData<&'a OwnedSocket<T>>,
+    _lt: PhantomData<Pin<&'a mut OwnedSocket<T>>>,
     pub(crate) net: &'static NetStack<R>,
     port: u8,
 }
 
+unsafe impl<T, R> Send for OwnedSocketHdl<'_, T, R>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+
+}
+
+unsafe impl<T, R> Sync for OwnedSocketHdl<'_, T, R>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+
+}
+
+unsafe impl<T, R> Sync for Recv<'_, '_, T, R>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+
+}
+
+pub struct Recv<'a, 'b, T, R>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+    hdl: &'a mut OwnedSocketHdl<'b, T, R>
+}
+
+impl<T, R> Future for Recv<'_, '_, T, R>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+{
+    type Output = OwnedMessage<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let res = self.hdl.net.inner.with_lock(|_net| {
+            let this_ref: &OwnedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
+            let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
+            if let Some(t) = box_ref.t.take() {
+                Some(t)
+            } else {
+                // todo
+                assert!(box_ref.wait.is_none());
+                // NOTE: Okay to register waker AFTER checking, because we
+                // have an exclusive lock
+                box_ref.wait = Some(cx.waker().clone());
+                None
+            }
+        });
+        if let Some(t) = res {
+            Poll::Ready(t)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 // TODO: impl drop, remove waker, remove socket
-impl<T, R> OwnedSocketHdl<'_, T, R>
+impl<'a, T, R> OwnedSocketHdl<'a, T, R>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
@@ -82,29 +147,8 @@ where
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
     // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
     // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
-    pub async fn recv(&mut self) -> OwnedMessage<T> {
-        poll_fn(|cx: &mut Context<'_>| {
-            let res = self.net.inner.with_lock(|_net| {
-                let this_ref: &OwnedSocket<T> = unsafe { self.ptr.as_ref() };
-                let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
-                if let Some(t) = box_ref.t.take() {
-                    Some(t)
-                } else {
-                    // todo
-                    assert!(box_ref.wait.is_none());
-                    // NOTE: Okay to register waker AFTER checking, because we
-                    // have an exclusive lock
-                    box_ref.wait = Some(cx.waker().clone());
-                    None
-                }
-            });
-            if let Some(t) = res {
-                Poll::Ready(t)
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
+    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R> {
+        Recv { hdl: self }
     }
 }
 

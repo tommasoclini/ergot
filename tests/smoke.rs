@@ -77,24 +77,29 @@ async fn req_resp() {
     let server = pin!(server);
     let mut server_hdl = server.attach(&STACK);
 
-    for i in 0..3 {
-        sleep(Duration::from_millis(10)).await;
+    let reqqr = tokio::task::spawn(async {
+        for i in 0..3 {
+            sleep(Duration::from_millis(10)).await;
 
-        // Make the request, look ma only the stack handle
-        let resp = STACK.req_resp::<ExampleEndpoint>(
-            Address { network_id: 0, node_id: 0, port_id: 0 },
-            Example { a: i as u8, b: i * 10 }
-        );
+            // Make the request, look ma only the stack handle
+            let resp = STACK.req_resp::<ExampleEndpoint>(
+                Address { network_id: 0, node_id: 0, port_id: 0 },
+                Example { a: i as u8, b: i * 10 }
+            ).await.unwrap();
 
-        // normally you'd do this in a loop...
+            println!("RESP: {resp:?}");
+        }
+    });
+
+
+    // normally you'd do this in a loop...
+    for _i in 0..3 {
         let srv = server_hdl.serve(async |req| {
             // fn(Example) -> u32
             req.b + 5
-        });
-
-        // TODO: Fix issues with Send to allow doing this in a spawned task
-        let (resp_res, srv_res) = tokio::join!(resp, srv);
-        println!("RESP: {resp_res:?}");
-        println!("SERV: {srv_res:?}");
+        }).await;
+        println!("SERV: {srv:?}");
     }
+
+    reqqr.await.unwrap();
 }
