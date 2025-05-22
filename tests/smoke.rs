@@ -1,13 +1,12 @@
 use std::{pin::pin, time::Duration};
 
-use ergot::{socket::endpoint::OwnedSocket, Address, NetStack};
+use ergot::{socket::endpoint::OwnedEndpointSocket, Address, NetStack};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use postcard_rpc::{endpoint, Endpoint};
 use serde::{Deserialize, Serialize};
 use postcard_schema::Schema;
 use tokio::{spawn, time::sleep};
 
-static STACK: NetStack<CriticalSectionRawMutex> = NetStack::new();
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Schema)]
 pub struct Example {
@@ -26,11 +25,12 @@ endpoint!(OtherEndpoint, Other, u32, "other");
 
 #[tokio::test]
 async fn hello() {
+    static STACK: NetStack<CriticalSectionRawMutex> = NetStack::new();
     let src = Address { network_id: 0, node_id: 0, port_id: 123 };
     let dst = Address { network_id: 0, node_id: 0, port_id: 0 };
 
     {
-        let socket = OwnedSocket::<ExampleEndpoint>::new();
+        let socket = OwnedEndpointSocket::<ExampleEndpoint>::new();
         let mut socket = pin!(socket);
         let mut hdl = socket.as_mut().attach(&STACK);
 
@@ -49,12 +49,12 @@ async fn hello() {
             STACK.send_raw(src, dst, ExampleEndpoint::REQ_KEY, &body).unwrap();
         });
 
-        let msg = hdl.recv().await;
+        let msg = hdl.recv_manual().await;
         assert_eq!(Address { network_id: 0, node_id: 0, port_id: 123 }, msg.src);
         assert_eq!(Address { network_id: 0, node_id: 0, port_id: 0 }, msg.dst);
         assert_eq!(Example { a: 42, b: 789 }, msg.t);
 
-        let msg = hdl.recv().await;
+        let msg = hdl.recv_manual().await;
 
         assert_eq!(Address { network_id: 0, node_id: 0, port_id: 123 }, msg.src);
         assert_eq!(Address { network_id: 0, node_id: 0, port_id: 0 }, msg.dst);
@@ -66,4 +66,35 @@ async fn hello() {
     // Both sends should fail.
     STACK.send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }).unwrap_err();
     STACK.send_ty::<Example>(src, dst, ExampleEndpoint::REQ_KEY, Example { a: 42, b: 789 }).unwrap_err();
+}
+
+#[tokio::test]
+async fn req_resp() {
+    static STACK: NetStack<CriticalSectionRawMutex> = NetStack::new();
+
+    // Start the server...
+    let server = OwnedEndpointSocket::<ExampleEndpoint>::new();
+    let server = pin!(server);
+    let mut server_hdl = server.attach(&STACK);
+
+    for i in 0..3 {
+        sleep(Duration::from_millis(10)).await;
+
+        // Make the request, look ma only the stack handle
+        let resp = STACK.req_resp::<ExampleEndpoint>(
+            Address { network_id: 0, node_id: 0, port_id: 0 },
+            Example { a: i as u8, b: i * 10 }
+        );
+
+        // normally you'd do this in a loop...
+        let srv = server_hdl.serve(async |req| {
+            // fn(Example) -> u32
+            req.b + 5
+        });
+
+        // TODO: Fix issues with Send to allow doing this in a spawned task
+        let (resp_res, srv_res) = tokio::join!(resp, srv);
+        println!("RESP: {resp_res:?}");
+        println!("SERV: {srv_res:?}");
+    }
 }

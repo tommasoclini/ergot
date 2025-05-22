@@ -1,11 +1,12 @@
 #![allow(clippy::result_unit_err)]
 
-use std::{any::TypeId, mem::ManuallyDrop, ptr::NonNull};
+use std::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
 
 use cordyceps::List;
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use postcard_rpc::Key;
-use socket::SocketHeader;
+use postcard_rpc::{Endpoint, Key};
+use serde::{de::DeserializeOwned, Serialize};
+use socket::{owned::OwnedSocket, SocketHeader};
 
 pub mod socket;
 
@@ -65,6 +66,29 @@ impl<R> NetStack<R>
 where
     R: ScopedRawMutex,
 {
+    pub async fn req_resp<E>(
+        &'static self,
+        dst: Address,
+        req: E::Request
+    ) -> Result<E::Response, ()>
+    where
+        E: Endpoint,
+        E::Request: Serialize + DeserializeOwned + 'static,
+        E::Response: Serialize + DeserializeOwned + 'static,
+    {
+        let resp_sock = OwnedSocket::<E::Response>::new(E::RESP_KEY);
+        let resp_sock = pin!(resp_sock);
+        let mut resp_hdl = resp_sock.attach(self);
+        self.send_ty(
+            Address { network_id: 0, node_id: 0, port_id: resp_hdl.port() },
+            dst,
+            E::REQ_KEY,
+            req,
+        )?;
+        let resp = resp_hdl.recv().await;
+        Ok(resp.t)
+    }
+
     pub fn send_raw(
         &'static self,
         src: Address,
@@ -159,7 +183,7 @@ where
 
         res
     }
-    pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) {
+    pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
         self.inner.with_lock(|inner| {
             // TODO: smarter than this, do something like littlefs2's "next free block"
             // bitmap thing?
@@ -184,6 +208,7 @@ where
             }
 
             inner.sockets.push_front(node);
+            inner.port_ctr
         })
     }
 }

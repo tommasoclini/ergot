@@ -8,6 +8,7 @@ use postcard_rpc::Key;
 use crate::Address;
 
 pub mod endpoint;
+pub mod owned;
 
 pub struct SocketHeader {
     pub(crate) links: Links<SocketHeader>,
