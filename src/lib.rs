@@ -5,8 +5,8 @@ use std::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
 use cordyceps::List;
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use postcard_rpc::{Endpoint, Key};
-use serde::{de::DeserializeOwned, Serialize};
-use socket::{owned::OwnedSocket, SocketHeader};
+use serde::{Serialize, de::DeserializeOwned};
+use socket::{SocketHeader, owned::OwnedSocket};
 
 pub mod socket;
 
@@ -69,7 +69,7 @@ where
     pub async fn req_resp<E>(
         &'static self,
         dst: Address,
-        req: E::Request
+        req: E::Request,
     ) -> Result<E::Response, ()>
     where
         E: Endpoint,
@@ -80,7 +80,11 @@ where
         let resp_sock = pin!(resp_sock);
         let mut resp_hdl = resp_sock.attach(self);
         self.send_ty(
-            Address { network_id: 0, node_id: 0, port_id: resp_hdl.port() },
+            Address {
+                network_id: 0,
+                node_id: 0,
+                port_id: resp_hdl.port(),
+            },
             dst,
             E::REQ_KEY,
             req,
@@ -190,13 +194,10 @@ where
             let start = inner.port_ctr;
             loop {
                 inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
-                let exists = inner
-                    .sockets
-                    .iter()
-                    .any(|s| {
-                        let port = unsafe { *s.port.get() };
-                        port == inner.port_ctr
-                    });
+                let exists = inner.sockets.iter().any(|s| {
+                    let port = unsafe { *s.port.get() };
+                    port == inner.port_ctr
+                });
                 if !exists {
                     break;
                 } else if inner.port_ctr == start {

@@ -1,9 +1,9 @@
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 
 use mutex::ScopedRawMutex;
 use pin_project::pin_project;
 use postcard_rpc::Endpoint;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::NetStack;
 
@@ -76,6 +76,8 @@ where
         let msg = self.hdl.recv().await;
         let OwnedMessage { src, dst, t } = msg;
         let resp = f(t).await;
-        self.hdl.net.send_ty::<E::Response>(dst, src, E::RESP_KEY, resp)
+        self.hdl
+            .net
+            .send_ty::<E::Response>(dst, src, E::RESP_KEY, resp)
     }
 }

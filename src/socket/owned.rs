@@ -75,7 +75,6 @@ where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-
 }
 
 unsafe impl<T, R> Sync for OwnedSocketHdl<'_, T, R>
@@ -84,7 +83,6 @@ where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-
 }
 
 unsafe impl<T, R> Sync for Recv<'_, '_, T, R>
@@ -93,7 +91,6 @@ where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-
 }
 
 pub struct Recv<'a, 'b, T, R>
@@ -101,7 +98,7 @@ where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
 {
-    hdl: &'a mut OwnedSocketHdl<'b, T, R>
+    hdl: &'a mut OwnedSocketHdl<'b, T, R>,
 }
 
 impl<T, R> Future for Recv<'_, '_, T, R>
@@ -197,9 +194,7 @@ where
     ) -> OwnedSocketHdl<'a, T, R> {
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
-        let port = unsafe {
-            stack.attach_socket(ptr_erase)
-        };
+        let port = unsafe { stack.attach_socket(ptr_erase) };
         OwnedSocketHdl {
             ptr: ptr_self,
             _lt: PhantomData,
