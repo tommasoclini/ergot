@@ -74,6 +74,7 @@ We might want some additional information in packets:
     * todo: use for things like sessionful connections?
 * TTL counter (4-8 bits)
 * QoS number (4-8 bits)
+* Something for fragmentation?
 
 ### Address compression?
 
@@ -107,3 +108,51 @@ Interfaces need to:
     * In a non-pipelined manner:
         * I dunno how to do this with the blocking mutex
 
+### A new day
+
+We probably need some way of plugging in different "interface + routing" impls. Off the top of my head:
+
+* a "null route" impl
+    * has zero interfaces
+    * has no routing table
+    * rejects all requests
+    * never determines a network/node id
+    * only useful as a placeholder, or for local-only comms
+* a "single lite" impl
+    * has exactly one interface
+    * has no routing table
+    * routes all outgoing packets (it has no idea if that is good or not)
+    * accepts any received network id as its own
+    * maybe accepts any received node id as its own?
+        * if not, does whatever the absolute minimum to autonegotiate a node id
+        * or, could maybe only support hardcoded node id
+    * useful in point to point links, esp w/ low resource nodes
+* a "single plus" interface?
+    * maybe very similar to single lite, but with some kind of limited routing table, to avoid wasting send time?
+    * or some more extensive net/node negotiation?
+    * might not be a good differentiator here. might just be "static node addr" vs "dynamic node addr".
+* a "multi lite" impl
+    * has 2+ interfaces
+    * has some routing table, maybe a configurable max depth?
+    * will only route packets to known networks
+    * needs to participate in network id selection
+    * needs to participate in node id selection
+* a "cadillac" impl
+    * has arbitrary number of interfaces
+    * has a "full world" view of the routing table
+    * tries to lead net/node id selection
+
+fun trick, some kind of "mushbrain" routing? A smarter router can say something like `(towards net,node)(rest of messsage)`. can be stacked multiple headers deep, so that a host with knowledge can bypass all nodes w/o routing info to get to destination
+
+How do we approach network id negotiation? do we require some kind of "seed router"? Maybe networks only get autonegotiated when at least one neighbor has a defined network id?
+
+* if a node has a single interface:
+    * it does nothing, it waits to be told what the netid is
+* if a node has multiple interfaces:
+    * if NONE of the interfaces have a netid:
+        * the node waits for one of the interfaces to be assigned a netid
+    * if ONE of the interfaces have a netid:
+        * periodically tell all netid-less interfaces that we have a hookup
+        * do some kind of negotiation of who becomes "in charge" of assigning a netid (some time windowed assignment?)
+        * pick a random network id for the new network
+        * do some kind of broadcast on all interfaces like "do you know of network 1234? tell me at NET,NODE,PORT"
