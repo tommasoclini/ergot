@@ -18,6 +18,7 @@ pub struct SocketHeader {
 }
 
 // TODO: Way of signaling "socket consumed"?
+#[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SocketSendError {
     NoSpace,

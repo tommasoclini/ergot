@@ -1,6 +1,6 @@
 use std::{pin::pin, time::Duration};
 
-use ergot::{Address, NetStack, socket::endpoint::OwnedEndpointSocket};
+use ergot::{interface_manager::NullInterfaceManager, socket::endpoint::OwnedEndpointSocket, Address, NetStack};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use postcard_rpc::{Endpoint, endpoint};
 use postcard_schema::Schema;
@@ -22,9 +22,11 @@ pub struct Other {
 endpoint!(ExampleEndpoint, Example, u32, "example");
 endpoint!(OtherEndpoint, Other, u32, "other");
 
+type TestNetStack = NetStack<CriticalSectionRawMutex, NullInterfaceManager>;
+
 #[tokio::test]
 async fn hello() {
-    static STACK: NetStack<CriticalSectionRawMutex> = NetStack::new();
+    static STACK: TestNetStack = NetStack::new();
     let src = Address {
         network_id: 0,
         node_id: 0,
@@ -63,7 +65,7 @@ async fn hello() {
             sleep(Duration::from_millis(100)).await;
             let body = postcard::to_stdvec(&Example { a: 56, b: 1234 }).unwrap();
             STACK
-                .send_raw(src, dst, ExampleEndpoint::REQ_KEY, &body)
+                .send_raw(src, dst, Some(ExampleEndpoint::REQ_KEY), &body)
                 .unwrap();
         });
 
@@ -125,7 +127,7 @@ async fn hello() {
 
 #[tokio::test]
 async fn req_resp() {
-    static STACK: NetStack<CriticalSectionRawMutex> = NetStack::new();
+    static STACK: TestNetStack = NetStack::new();
 
     // Start the server...
     let server = OwnedEndpointSocket::<ExampleEndpoint>::new();
