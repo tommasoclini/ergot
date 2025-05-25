@@ -18,6 +18,13 @@ pub struct SocketHeader {
 }
 
 // TODO: Way of signaling "socket consumed"?
+#[non_exhaustive]
+pub enum SocketSendError {
+    NoSpace,
+    DeserFailed,
+    TypeMismatch,
+    WhatTheHell,
+}
 
 // Morally: &mut ManuallyDrop<T>, TypeOf<T>, src, dst
 // If return OK: the type has been moved OUT of the source
@@ -33,7 +40,7 @@ pub type SendOwned = fn(
     Address,
     // the src
     Address,
-) -> Result<(), ()>;
+) -> Result<(), SocketSendError>;
 // Morally: &T, src, dst
 // Always a serialize
 pub type SendBorrowed = fn(
@@ -45,9 +52,9 @@ pub type SendBorrowed = fn(
     Address,
     // The dst
     Address,
-) -> Result<(), ()>;
+) -> Result<(), SocketSendError>;
 // Morally: it's a packet
-// Never a serialize
+// Never a serialize, sometimes a deserialize
 pub type SendRaw = fn(
     // The socket ptr
     NonNull<()>,
@@ -57,13 +64,13 @@ pub type SendRaw = fn(
     Address,
     // The dst
     Address,
-) -> Result<(), ()>;
+) -> Result<(), SocketSendError>;
 
 #[derive(Clone)]
 pub struct SocketVTable {
     pub(crate) send_owned: Option<SendOwned>,
     pub(crate) send_bor: Option<SendBorrowed>,
-    pub(crate) send_raw: Option<SendRaw>,
+    pub(crate) send_raw: SendRaw,
     // NOTE: We do *not* have a `drop` impl here, because the list
     // doesn't ACTUALLY own the nodes, so it is not responsible for dropping
     // them. They are naturally destroyed by their true owner.

@@ -3,35 +3,37 @@
 use std::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
 
 use cordyceps::List;
+use interface_manager::{InterfaceManager, InterfaceSendError};
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use postcard_rpc::{Endpoint, Key};
 use serde::{Serialize, de::DeserializeOwned};
-use socket::{SocketHeader, owned::OwnedSocket};
+use socket::{SocketHeader, SocketSendError, owned::OwnedSocket};
 
+pub mod interface_manager;
 pub mod socket;
 
-struct NetStackInner {
+struct NetStackInner<M: InterfaceManager> {
     sockets: List<SocketHeader>,
+    manager: M,
     port_ctr: u8,
 }
 
-impl NetStackInner {
+impl<M> NetStackInner<M>
+where
+    M: InterfaceManager,
+    M: interface_manager::ConstInit,
+{
     pub const fn new() -> Self {
         Self {
             sockets: List::new(),
             port_ctr: 0,
+            manager: M::INIT,
         }
     }
 }
 
-impl Default for NetStackInner {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct NetStack<R: ScopedRawMutex> {
-    inner: BlockingMutex<R, NetStackInner>,
+pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
+    inner: BlockingMutex<R, NetStackInner<M>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,11 +51,24 @@ impl Address {
             port_id: 0,
         }
     }
+
+    #[inline]
+    pub fn net_node_any(&self) -> bool {
+        self.network_id == 0 && self.node_id == 0
+    }
 }
 
-impl<R> NetStack<R>
+#[non_exhaustive]
+pub enum NetStackSendError {
+    SocketSend(SocketSendError),
+    InterfaceSend(InterfaceSendError),
+    NoRoute,
+}
+
+impl<R, M> NetStack<R, M>
 where
     R: ScopedRawMutex + ConstInit,
+    M: InterfaceManager + interface_manager::ConstInit,
 {
     pub const fn new() -> Self {
         Self {
@@ -62,15 +77,16 @@ where
     }
 }
 
-impl<R> NetStack<R>
+impl<R, M> NetStack<R, M>
 where
     R: ScopedRawMutex,
+    M: InterfaceManager,
 {
     pub async fn req_resp<E>(
         &'static self,
         dst: Address,
         req: E::Request,
-    ) -> Result<E::Response, ()>
+    ) -> Result<E::Response, NetStackSendError>
     where
         E: Endpoint,
         E::Request: Serialize + DeserializeOwned + 'static,
@@ -97,40 +113,46 @@ where
         &'static self,
         src: Address,
         dst: Address,
-        key: Key,
+        key: Option<Key>,
         body: &[u8],
-    ) -> Result<(), ()> {
-        // todo: real routing
-        assert_eq!(src.network_id, 0);
-        assert_eq!(dst.network_id, 0);
-        assert_eq!(src.node_id, 0);
-        assert_eq!(dst.node_id, 0);
+    ) -> Result<(), NetStackSendError> {
+
+        let local_bypass = src.net_node_any() && dst.net_node_any();
 
         self.inner.with_lock(|inner| {
-            for socket in inner.sockets.iter_raw() {
-                let (port, vtable, skt_key) = unsafe {
-                    let skt_ref = socket.as_ref();
-                    let port = *skt_ref.port.get();
-                    let vtable = skt_ref.vtable.clone();
-                    (port, vtable, skt_ref.key)
-                };
-                // TODO: only allow port_id == 0 if there is only one matching port
-                // with this key.
-                // TODO: some kind of distinction of ports that have reasonable return
-                // addrs? Should addr just carry the key?
-                if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
-                    let res = if let Some(f) = vtable.send_raw {
-                        let this: NonNull<SocketHeader> = socket;
-                        let this: NonNull<()> = this.cast();
-                        (f)(this, body, src, dst)
-                    } else {
-                        // keep going?
-                        Err(())
-                    };
-                    return res;
+            let res = if !local_bypass {
+                inner.manager.send_raw(src, dst, body)
+            } else {
+                Err(InterfaceSendError::DestinationLocal)
+            };
+
+            match res {
+                Ok(()) => Ok(()),
+                Err(InterfaceSendError::DestinationLocal) => {
+                    for socket in inner.sockets.iter_raw() {
+                        let (port, vtable, skt_key) = unsafe {
+                            let skt_ref = socket.as_ref();
+                            let port = *skt_ref.port.get();
+                            let vtable = skt_ref.vtable.clone();
+                            (port, vtable, skt_ref.key)
+                        };
+                        // TODO: only allow port_id == 0 if there is only one matching port
+                        // with this key.
+                        if (port == dst.port_id) || (dst.port_id == 0 && key.is_some_and(|k| k == skt_key)) {
+                            let res = {
+                                let f = vtable.send_raw;
+                                let this: NonNull<SocketHeader> = socket;
+                                let this: NonNull<()> = this.cast();
+                                // todo
+                                (f)(this, body, src, dst).map_err(NetStackSendError::SocketSend)
+                            };
+                            return res;
+                        }
+                    }
+                    Err(NetStackSendError::NoRoute)
                 }
+                Err(e) => Err(NetStackSendError::InterfaceSend(e)),
             }
-            Err(())
         })
     }
     pub fn send_ty<T: 'static>(
@@ -139,7 +161,8 @@ where
         dst: Address,
         key: Key,
         t: T,
-    ) -> Result<(), ()> {
+    ) -> Result<(), NetStackSendError> {
+
         // todo: real routing
         assert_eq!(src.network_id, 0);
         assert_eq!(dst.network_id, 0);
@@ -170,22 +193,26 @@ where
                         todo!()
                     } else {
                         // keep going?
-                        Err(())
+                        Err(SocketSendError::WhatTheHell)
                     };
-                    return res;
+                    return Some(res);
                 }
             }
-            Err(())
+            None
         });
 
         // If we didn't ever take the item, we need to drop it
-        if res.is_err() {
+        if res.is_none() || res.as_ref().is_some_and(|r| r.is_err()) {
             unsafe {
                 ManuallyDrop::drop(&mut t);
             }
         }
 
-        res
+        if let Some(r) = res {
+            r.map_err(NetStackSendError::SocketSend)
+        } else {
+            Err(NetStackSendError::NoRoute)
+        }
     }
     pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
         self.inner.with_lock(|inner| {
@@ -214,9 +241,10 @@ where
     }
 }
 
-impl<R> Default for NetStack<R>
+impl<R, M> Default for NetStack<R, M>
 where
     R: ScopedRawMutex + ConstInit,
+    M: InterfaceManager + interface_manager::ConstInit,
 {
     fn default() -> Self {
         Self::new()

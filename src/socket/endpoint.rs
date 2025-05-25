@@ -5,7 +5,7 @@ use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::NetStack;
+use crate::{interface_manager::InterfaceManager, NetStack, NetStackSendError};
 
 use super::owned::{OwnedMessage, OwnedSocket, OwnedSocketHdl};
 
@@ -30,12 +30,12 @@ where
         }
     }
 
-    pub fn attach<'a, R: ScopedRawMutex + 'static>(
+    pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
         self: Pin<&'a mut Self>,
-        stack: &'static NetStack<R>,
-    ) -> OwnedEndpointSocketHdl<'a, E, R> {
+        stack: &'static NetStack<R, M>,
+    ) -> OwnedEndpointSocketHdl<'a, E, R, M> {
         let this = self.project();
-        let hdl: OwnedSocketHdl<'_, E::Request, R> = this.sock.attach(stack);
+        let hdl: OwnedSocketHdl<'_, E::Request, R, M> = this.sock.attach(stack);
         OwnedEndpointSocketHdl { hdl }
     }
 }
@@ -50,26 +50,28 @@ where
     }
 }
 
-pub struct OwnedEndpointSocketHdl<'a, E, R>
+pub struct OwnedEndpointSocketHdl<'a, E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
-    hdl: OwnedSocketHdl<'a, E::Request, R>,
+    hdl: OwnedSocketHdl<'a, E::Request, R, M>,
 }
 
-impl<E, R> OwnedEndpointSocketHdl<'_, E, R>
+impl<E, R, M> OwnedEndpointSocketHdl<'_, E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     pub async fn recv_manual(&mut self) -> OwnedMessage<E::Request> {
         self.hdl.recv().await
     }
 
-    pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(&mut self, f: F) -> Result<(), ()>
+    pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(&mut self, f: F) -> Result<(), NetStackSendError>
     where
         E::Response: Serialize + DeserializeOwned + 'static,
     {

@@ -2,7 +2,6 @@
 use core::cell::UnsafeCell;
 use std::{
     any::TypeId,
-    future::poll_fn,
     marker::PhantomData,
     pin::Pin,
     ptr::NonNull,
@@ -14,9 +13,9 @@ use mutex::ScopedRawMutex;
 use postcard_rpc::Key;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{Address, NetStack};
+use crate::{interface_manager::InterfaceManager, Address, NetStack};
 
-use super::{SocketHeader, SocketVTable};
+use super::{SocketSendError, SocketHeader, SocketVTable};
 
 #[derive(Debug, PartialEq)]
 pub struct OwnedMessage<T: 'static> {
@@ -58,53 +57,59 @@ where
     inner: UnsafeCell<OneBox<T>>,
 }
 
-pub struct OwnedSocketHdl<'a, T, R>
+pub struct OwnedSocketHdl<'a, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     pub(crate) ptr: NonNull<OwnedSocket<T>>,
     _lt: PhantomData<Pin<&'a mut OwnedSocket<T>>>,
-    pub(crate) net: &'static NetStack<R>,
+    pub(crate) net: &'static NetStack<R, M>,
     port: u8,
 }
 
-unsafe impl<T, R> Send for OwnedSocketHdl<'_, T, R>
+unsafe impl<T, R, M> Send for OwnedSocketHdl<'_, T, R, M>
 where
     T: Send,
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
 }
 
-unsafe impl<T, R> Sync for OwnedSocketHdl<'_, T, R>
+unsafe impl<T, R, M> Sync for OwnedSocketHdl<'_, T, R, M>
 where
     T: Send,
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
 }
 
-unsafe impl<T, R> Sync for Recv<'_, '_, T, R>
+unsafe impl<T, R, M> Sync for Recv<'_, '_, T, R, M>
 where
     T: Send,
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
 }
 
-pub struct Recv<'a, 'b, T, R>
+pub struct Recv<'a, 'b, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
-    hdl: &'a mut OwnedSocketHdl<'b, T, R>,
+    hdl: &'a mut OwnedSocketHdl<'b, T, R, M>,
 }
 
-impl<T, R> Future for Recv<'_, '_, T, R>
+impl<T, R, M> Future for Recv<'_, '_, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     type Output = OwnedMessage<T>;
 
@@ -132,10 +137,11 @@ where
 }
 
 // TODO: impl drop, remove waker, remove socket
-impl<'a, T, R> OwnedSocketHdl<'a, T, R>
+impl<'a, T, R, M> OwnedSocketHdl<'a, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     pub fn port(&self) -> u8 {
         self.port
@@ -144,15 +150,16 @@ where
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
     // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
     // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
-    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R> {
+    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R, M> {
         Recv { hdl: self }
     }
 }
 
-impl<T, R> Drop for OwnedSocketHdl<'_, T, R>
+impl<T, R, M> Drop for OwnedSocketHdl<'_, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     fn drop(&mut self) {
         // first things first, remove the item from the list
@@ -188,10 +195,10 @@ where
         }
     }
 
-    pub fn attach<'a, R: ScopedRawMutex + 'static>(
+    pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
         self: Pin<&'a mut Self>,
-        stack: &'static NetStack<R>,
-    ) -> OwnedSocketHdl<'a, T, R> {
+        stack: &'static NetStack<R, M>,
+    ) -> OwnedSocketHdl<'a, T, R, M> {
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
@@ -207,8 +214,11 @@ where
     const fn vtable() -> SocketVTable {
         SocketVTable {
             send_owned: Some(Self::send_owned),
+            // TODO: We probably COULD support this, but I'm pretty sure it
+            // would require serializing, copying to a buffer, then later
+            // deserializing. I really don't know if we WANT this.
             send_bor: None,
-            send_raw: Some(Self::send_raw),
+            send_raw: Self::send_raw,
         }
     }
 
@@ -218,10 +228,10 @@ where
         ty: &TypeId,
         src: Address,
         dst: Address,
-    ) -> Result<(), ()> {
+    ) -> Result<(), SocketSendError> {
         if &TypeId::of::<T>() != ty {
             debug_assert!(false, "Type Mismatch!");
-            return Err(());
+            return Err(SocketSendError::TypeMismatch);
         }
         let that: NonNull<T> = that.cast();
         let this: NonNull<Self> = this.cast();
@@ -229,7 +239,7 @@ where
         let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
 
         if mutitem.t.is_some() {
-            return Err(());
+            return Err(SocketSendError::NoSpace);
         }
 
         mutitem.t = Some(OwnedMessage {
@@ -254,13 +264,13 @@ where
     //     Err(())
     // }
 
-    fn send_raw(this: NonNull<()>, that: &[u8], src: Address, dst: Address) -> Result<(), ()> {
+    fn send_raw(this: NonNull<()>, that: &[u8], src: Address, dst: Address) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
         let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
 
         if mutitem.t.is_some() {
-            return Err(());
+            return Err(SocketSendError::NoSpace);
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
@@ -270,7 +280,7 @@ where
             }
             Ok(())
         } else {
-            Err(())
+            Err(SocketSendError::DeserFailed)
         }
     }
 }

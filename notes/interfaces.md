@@ -156,3 +156,14 @@ How do we approach network id negotiation? do we require some kind of "seed rout
         * do some kind of negotiation of who becomes "in charge" of assigning a netid (some time windowed assignment?)
         * pick a random network id for the new network
         * do some kind of broadcast on all interfaces like "do you know of network 1234? tell me at NET,NODE,PORT"
+
+# Interface Manager
+
+What about vtable?
+
+* "is this address us?" or "what is your address?"
+    * opt: "has our address changed since last ask?"
+* "can you route this addr", or just "send"
+    * Avoid a toctou, "don't ask to ask"?
+
+The interface manager is independent from the interface.
