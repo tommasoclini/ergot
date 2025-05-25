@@ -5,7 +5,7 @@ use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{interface_manager::InterfaceManager, NetStack, NetStackSendError};
+use crate::{NetStack, NetStackSendError, interface_manager::InterfaceManager};
 
 use super::owned::{OwnedMessage, OwnedSocket, OwnedSocketHdl};
 
@@ -71,7 +71,10 @@ where
         self.hdl.recv().await
     }
 
-    pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(&mut self, f: F) -> Result<(), NetStackSendError>
+    pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(
+        &mut self,
+        f: F,
+    ) -> Result<(), NetStackSendError>
     where
         E::Response: Serialize + DeserializeOwned + 'static,
     {

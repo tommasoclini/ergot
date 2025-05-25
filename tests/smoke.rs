@@ -1,6 +1,9 @@
 use std::{pin::pin, time::Duration};
 
-use ergot::{interface_manager::NullInterfaceManager, socket::endpoint::OwnedEndpointSocket, Address, NetStack};
+use ergot::{
+    Address, NetStack, interface_manager::NullInterfaceManager,
+    socket::endpoint::OwnedEndpointSocket,
+};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use postcard_rpc::{Endpoint, endpoint};
 use postcard_schema::Schema;

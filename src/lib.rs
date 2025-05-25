@@ -117,7 +117,6 @@ where
         key: Option<Key>,
         body: &[u8],
     ) -> Result<(), NetStackSendError> {
-
         let local_bypass = src.net_node_any() && dst.net_node_any();
 
         self.inner.with_lock(|inner| {
@@ -139,7 +138,9 @@ where
                         };
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
-                        if (port == dst.port_id) || (dst.port_id == 0 && key.is_some_and(|k| k == skt_key)) {
+                        if (port == dst.port_id)
+                            || (dst.port_id == 0 && key.is_some_and(|k| k == skt_key))
+                        {
                             let res = {
                                 let f = vtable.send_raw;
                                 let this: NonNull<SocketHeader> = socket;
@@ -163,7 +164,6 @@ where
         key: Key,
         t: T,
     ) -> Result<(), NetStackSendError> {
-
         // todo: real routing
         assert_eq!(src.network_id, 0);
         assert_eq!(dst.network_id, 0);

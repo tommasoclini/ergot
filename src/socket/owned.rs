@@ -13,9 +13,9 @@ use mutex::ScopedRawMutex;
 use postcard_rpc::Key;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{interface_manager::InterfaceManager, Address, NetStack};
+use crate::{Address, NetStack, interface_manager::InterfaceManager};
 
-use super::{SocketSendError, SocketHeader, SocketVTable};
+use super::{SocketHeader, SocketSendError, SocketVTable};
 
 #[derive(Debug, PartialEq)]
 pub struct OwnedMessage<T: 'static> {
@@ -264,7 +264,12 @@ where
     //     Err(())
     // }
 
-    fn send_raw(this: NonNull<()>, that: &[u8], src: Address, dst: Address) -> Result<(), SocketSendError> {
+    fn send_raw(
+        this: NonNull<()>,
+        that: &[u8],
+        src: Address,
+        dst: Address,
+    ) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
         let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
