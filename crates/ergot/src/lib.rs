@@ -157,6 +157,7 @@ where
             }
         })
     }
+
     pub fn send_ty<T: 'static>(
         &'static self,
         src: Address,
@@ -215,6 +216,7 @@ where
             Err(NetStackSendError::NoRoute)
         }
     }
+
     pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
         self.inner.with_lock(|inner| {
             // TODO: smarter than this, do something like littlefs2's "next free block"
