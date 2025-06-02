@@ -1,11 +1,12 @@
 [package]
-name = "ergot"
+name = "ergot-router"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "time", "io-util"] }
+
 const-fnv1a-hash = "1.1.0"
-tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }
 
 cordyceps = "0.3.4"
 critical-section = { version = "1.2.0", features = ["std"] }
@@ -17,4 +18,8 @@ bbq2 = "0.1.0"
 serde = { version = "1.0", features = ["derive"] }
 postcard-rpc = "0.11.9"
 postcard-schema = { version = "0.2.1", features = ["derive"] }
-cobs = "0.3.0"
+cobs = { version = "0.3.0", features = ["use_std"] }
+
+
+[dependencies.ergot]
+path = "../../crates/ergot"

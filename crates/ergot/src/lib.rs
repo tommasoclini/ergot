@@ -16,6 +16,7 @@ struct NetStackInner<M: InterfaceManager> {
     sockets: List<SocketHeader>,
     manager: M,
     port_ctr: u8,
+    seq_no: u16,
 }
 
 impl<M> NetStackInner<M>
@@ -28,6 +29,7 @@ where
             sockets: List::new(),
             port_ctr: 0,
             manager: M::INIT,
+            seq_no: 0,
         }
     }
 }
@@ -56,6 +58,20 @@ impl Address {
     pub fn net_node_any(&self) -> bool {
         self.network_id == 0 && self.node_id == 0
     }
+
+    #[inline]
+    pub fn as_u32(&self) -> u32 {
+        ((self.network_id as u32) << 16) | ((self.node_id as u32) << 8) | (self.port_id as u32)
+    }
+
+    #[inline]
+    pub fn from_word(word: u32) -> Self {
+        Self {
+            network_id: (word >> 16) as u16,
+            node_id: (word >> 8) as u8,
+            port_id: word as u8,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +80,7 @@ pub enum NetStackSendError {
     SocketSend(SocketSendError),
     InterfaceSend(InterfaceSendError),
     NoRoute,
+    AnyPortMissingKey,
 }
 
 impl<R, M> NetStack<R, M>
@@ -83,6 +100,10 @@ where
     R: ScopedRawMutex,
     M: InterfaceManager,
 {
+    pub fn with_interface_manager<F: FnOnce(&mut M) -> U, U>(&'static self, f: F) -> U {
+        self.inner.with_lock(|inner| f(&mut inner.manager))
+    }
+
     pub async fn req_resp<E>(
         &'static self,
         dst: Address,
@@ -105,7 +126,10 @@ where
             dst,
             E::REQ_KEY,
             req,
+            None
         )?;
+        // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
+        // port ids now?
         let resp = resp_hdl.recv().await;
         Ok(resp.t)
     }
@@ -116,12 +140,16 @@ where
         dst: Address,
         key: Option<Key>,
         body: &[u8],
+        seq_no: Option<u16>,
     ) -> Result<(), NetStackSendError> {
+        if dst.port_id == 0 && key.is_none() {
+            return Err(NetStackSendError::AnyPortMissingKey);
+        }
         let local_bypass = src.net_node_any() && dst.net_node_any();
 
         self.inner.with_lock(|inner| {
             let res = if !local_bypass {
-                inner.manager.send_raw(src, dst, body)
+                inner.manager.send_raw(src, dst, key, body)
             } else {
                 Err(InterfaceSendError::DestinationLocal)
             };
@@ -145,8 +173,15 @@ where
                                 let f = vtable.send_raw;
                                 let this: NonNull<SocketHeader> = socket;
                                 let this: NonNull<()> = this.cast();
-                                // todo
-                                (f)(this, body, src, dst).map_err(NetStackSendError::SocketSend)
+                                let seq_no = if let Some(seq) = seq_no {
+                                    seq
+                                } else {
+                                    let seq = inner.seq_no;
+                                    inner.seq_no = inner.seq_no.wrapping_add(1);
+                                    seq
+                                };
+
+                                (f)(this, body, src, dst, seq_no).map_err(NetStackSendError::SocketSend)
                             };
                             return res;
                         }
@@ -158,63 +193,94 @@ where
         })
     }
 
-    pub fn send_ty<T: 'static>(
+    pub fn send_ty<T: 'static + Serialize>(
         &'static self,
         src: Address,
         dst: Address,
         key: Key,
         t: T,
+        seq_no: Option<u16>,
     ) -> Result<(), NetStackSendError> {
-        // todo: real routing
-        assert_eq!(src.network_id, 0);
-        assert_eq!(dst.network_id, 0);
-        assert_eq!(src.node_id, 0);
-        assert_eq!(dst.node_id, 0);
-        let mut t = ManuallyDrop::new(t);
+        // Can we assume the destination is local?
+        let local_bypass = src.net_node_any() && dst.net_node_any();
 
-        let res = self.inner.with_lock(|inner| {
-            for socket in inner.sockets.iter_raw() {
-                let (port, vtable, skt_key) = unsafe {
-                    let skt_ref = socket.as_ref();
-                    let port = *skt_ref.port.get();
-                    let vtable = skt_ref.vtable.clone();
-                    (port, vtable, skt_ref.key)
-                };
-                // TODO: only allow port_id == 0 if there is only one matching port
-                // with this key.
-                // TODO: some kind of distinction of ports that have reasonable return
-                // addrs? Should addr just carry the key?
-                if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
-                    let res = if let Some(f) = vtable.send_owned {
-                        let this: NonNull<SocketHeader> = socket;
-                        let this: NonNull<()> = this.cast();
-                        let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
-                        let that: NonNull<()> = that.cast();
-                        (f)(this, that, &TypeId::of::<T>(), src, dst)
-                    } else if let Some(_f) = vtable.send_bor {
-                        todo!()
-                    } else {
-                        // keep going?
-                        Err(SocketSendError::WhatTheHell)
-                    };
-                    return Some(res);
+        self.inner.with_lock(|inner| {
+            let res = if !local_bypass {
+                // Not local: offer to the interface manager to send
+                inner.manager.send(src, dst, Some(key), &t)
+            } else {
+                // just skip to local sending
+                Err(InterfaceSendError::DestinationLocal)
+            };
+
+            match res {
+                // We sent it via the interface, all done. T is dropped naturally
+                Ok(()) => Ok(()),
+                Err(InterfaceSendError::DestinationLocal) => {
+                    // Sending to a local interface means a potential move. Create a
+                    // manuallydrop, if a send succeeds, then we have "moved from" here
+                    // into the destination. If no send succeeds (e.g. no socket match
+                    // or sending to the socket failed) then we will need to drop the
+                    // value ourselves.
+                    let mut t = ManuallyDrop::new(t);
+
+                    // Check each socket to see if we want to send it there...
+                    for socket in inner.sockets.iter_raw() {
+                        let (port, vtable, skt_key) = unsafe {
+                            let skt_ref = socket.as_ref();
+                            let port = *skt_ref.port.get();
+                            let vtable = skt_ref.vtable.clone();
+                            (port, vtable, skt_ref.key)
+                        };
+                        // TODO: only allow port_id == 0 if there is only one matching port
+                        // with this key.
+                        if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
+                            let res = if let Some(f) = vtable.send_owned {
+                                let this: NonNull<SocketHeader> = socket;
+                                let this: NonNull<()> = this.cast();
+                                let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
+                                let that: NonNull<()> = that.cast();
+                                let seq_no = if let Some(seq) = seq_no {
+                                    seq
+                                } else {
+                                    let seq = inner.seq_no;
+                                    inner.seq_no = inner.seq_no.wrapping_add(1);
+                                    seq
+                                };
+                                (f)(this, that, &TypeId::of::<T>(), src, dst, seq_no)
+                                    .map_err(NetStackSendError::SocketSend)
+                            } else if let Some(_f) = vtable.send_bor {
+                                // TODO: if we support send borrowed, then we need to
+                                // drop the manuallydrop here, success or failure.
+                                todo!()
+                            } else {
+                                // todo: keep going? If we found the "right" destination and
+                                // sending fails, then there's not much we can do. Probably: there
+                                // is no case where a socket has NEITHER send_owned NOR send_bor,
+                                // can we make this state impossible instead?
+                                Err(NetStackSendError::SocketSend(SocketSendError::WhatTheHell))
+                            };
+
+                            // If sending failed, we did NOT move the T, which means it's on us
+                            // to drop it.
+                            if res.is_err() {
+                                unsafe {
+                                    ManuallyDrop::drop(&mut t);
+                                }
+                            }
+                            return res;
+                        }
+                    }
+
+                    // We reached the end of sockets. We need to drop this item.
+                    unsafe {
+                        ManuallyDrop::drop(&mut t);
+                    }
+                    Err(NetStackSendError::NoRoute)
                 }
+                Err(e) => Err(NetStackSendError::InterfaceSend(e)),
             }
-            None
-        });
-
-        // If we didn't ever take the item, we need to drop it
-        if res.is_none() || res.as_ref().is_some_and(|r| r.is_err()) {
-            unsafe {
-                ManuallyDrop::drop(&mut t);
-            }
-        }
-
-        if let Some(r) = res {
-            r.map_err(NetStackSendError::SocketSend)
-        } else {
-            Err(NetStackSendError::NoRoute)
-        }
+        })
     }
 
     pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
@@ -253,25 +319,3 @@ where
         Self::new()
     }
 }
-
-// TODO: Routing table, what does it do?
-// TODO: Socket vtable, what does it do?
-//   - process type t
-//   - process bytes &[u8]
-//   - for both:
-//     - do we remove/consume the socket
-//     - did the receive succeed or not
-//     - take a waker (optional)
-
-// TODO:
-//
-// We should have some netstack-level equivalent of `req_resp`.
-//   it should:
-//
-// 1. register the RECEPTION socket
-//   * oneshot
-//   * ACTUALLY "response || error || None" type
-// 2. attempt to send the request
-//   * if success, await socket rx
-//   * if fail, return, ensure that drop is enough to remove
-//       the listening socket

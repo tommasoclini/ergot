@@ -51,7 +51,7 @@ async fn hello() {
 
             // try sending, should fail
             STACK
-                .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 })
+                .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }, None)
                 .unwrap_err();
             // typed sending works
             STACK
@@ -60,6 +60,7 @@ async fn hello() {
                     dst,
                     ExampleEndpoint::REQ_KEY,
                     Example { a: 42, b: 789 },
+                    None,
                 )
                 .unwrap();
             // raw sending works
@@ -68,7 +69,7 @@ async fn hello() {
             sleep(Duration::from_millis(100)).await;
             let body = postcard::to_stdvec(&Example { a: 56, b: 1234 }).unwrap();
             STACK
-                .send_raw(src, dst, Some(ExampleEndpoint::REQ_KEY), &body)
+                .send_raw(src, dst, Some(ExampleEndpoint::REQ_KEY), &body, None)
                 .unwrap();
         });
 
@@ -116,7 +117,7 @@ async fn hello() {
     //
     // Both sends should fail.
     STACK
-        .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 })
+        .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }, None)
         .unwrap_err();
     STACK
         .send_ty::<Example>(
@@ -124,6 +125,7 @@ async fn hello() {
             dst,
             ExampleEndpoint::REQ_KEY,
             Example { a: 42, b: 789 },
+            None,
         )
         .unwrap_err();
 }

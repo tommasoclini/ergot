@@ -21,6 +21,7 @@ use super::{SocketHeader, SocketSendError, SocketVTable};
 pub struct OwnedMessage<T: 'static> {
     pub src: Address,
     pub dst: Address,
+    pub seq: u16,
     pub t: T,
 }
 
@@ -228,6 +229,7 @@ where
         ty: &TypeId,
         src: Address,
         dst: Address,
+        seq: u16,
     ) -> Result<(), SocketSendError> {
         if &TypeId::of::<T>() != ty {
             debug_assert!(false, "Type Mismatch!");
@@ -246,6 +248,7 @@ where
             src,
             dst,
             t: unsafe { that.read() },
+            seq,
         });
         if let Some(w) = mutitem.wait.take() {
             w.wake();
@@ -269,6 +272,7 @@ where
         that: &[u8],
         src: Address,
         dst: Address,
+        seq: u16,
     ) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
@@ -279,7 +283,7 @@ where
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
-            mutitem.t = Some(OwnedMessage { src, dst, t });
+            mutitem.t = Some(OwnedMessage { src, dst, t, seq });
             if let Some(w) = mutitem.wait.take() {
                 w.wake();
             }

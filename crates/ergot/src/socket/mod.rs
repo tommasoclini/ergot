@@ -41,6 +41,8 @@ pub type SendOwned = fn(
     Address,
     // the src
     Address,
+    // the seq_no
+    u16,
 ) -> Result<(), SocketSendError>;
 // Morally: &T, src, dst
 // Always a serialize
@@ -53,6 +55,8 @@ pub type SendBorrowed = fn(
     Address,
     // The dst
     Address,
+    // the seq_no
+    u16,
 ) -> Result<(), SocketSendError>;
 // Morally: it's a packet
 // Never a serialize, sometimes a deserialize
@@ -65,6 +69,8 @@ pub type SendRaw = fn(
     Address,
     // The dst
     Address,
+    // the seq_no
+    u16,
 ) -> Result<(), SocketSendError>;
 
 #[derive(Clone)]

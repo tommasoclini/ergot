@@ -1,12 +1,23 @@
+use postcard_rpc::Key;
 use serde::Serialize;
-
 use crate::Address;
+
+pub mod std_tcp;
 
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InterfaceSendError {
+    /// Refusing to send local destination remotely
     DestinationLocal,
+    /// Interface Manager does not know how to route to requested destination
+    NoRouteToDest,
+    /// Interface Manager found a destination interface, but that interface
+    /// was full in space/slots
+    InterfaceFull,
+    /// TODO: Remove
     PlaceholderOhNo,
+    /// Destination was an "any" port, but a key was not provided
+    AnyPortMissingKey,
 }
 
 pub trait ConstInit {
@@ -24,6 +35,7 @@ pub trait InterfaceManager {
         &mut self,
         src: Address,
         dst: Address,
+        key: Option<Key>,
         data: &T,
     ) -> Result<(), InterfaceSendError>;
 
@@ -31,6 +43,7 @@ pub trait InterfaceManager {
         &mut self,
         src: Address,
         dst: Address,
+        key: Option<Key>,
         data: &[u8],
     ) -> Result<(), InterfaceSendError>;
 }
@@ -48,6 +61,7 @@ impl InterfaceManager for NullInterfaceManager {
         &mut self,
         _src: Address,
         dst: Address,
+        _key: Option<Key>,
         _data: &T,
     ) -> Result<(), InterfaceSendError> {
         if dst.net_node_any() {
@@ -61,6 +75,7 @@ impl InterfaceManager for NullInterfaceManager {
         &mut self,
         _src: Address,
         dst: Address,
+        _key: Option<Key>,
         _data: &[u8],
     ) -> Result<(), InterfaceSendError> {
         if dst.net_node_any() {

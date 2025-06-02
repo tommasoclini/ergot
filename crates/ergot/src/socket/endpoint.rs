@@ -79,10 +79,10 @@ where
         E::Response: Serialize + DeserializeOwned + 'static,
     {
         let msg = self.hdl.recv().await;
-        let OwnedMessage { src, dst, t } = msg;
+        let OwnedMessage { src, dst, t, seq } = msg;
         let resp = f(t).await;
         self.hdl
             .net
-            .send_ty::<E::Response>(dst, src, E::RESP_KEY, resp)
+            .send_ty::<E::Response>(dst, src, E::RESP_KEY, resp, Some(seq))
     }
 }
