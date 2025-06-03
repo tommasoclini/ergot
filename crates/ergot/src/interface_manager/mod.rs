@@ -2,7 +2,7 @@ use postcard_rpc::Key;
 use serde::Serialize;
 use crate::Address;
 
-pub mod std_tcp;
+pub mod std_tcp_router;
 
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]

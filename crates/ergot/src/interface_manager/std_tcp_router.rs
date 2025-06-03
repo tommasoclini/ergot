@@ -467,6 +467,9 @@ pub fn register_interface<R: ScopedRawMutex>(
 }
 
 mod acc {
+    //! Basically postcard's cobs accumulator, but without the deser part
+
+
     pub struct CobsAccumulator {
         buf: Box<[u8]>,
         idx: usize,
