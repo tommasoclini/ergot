@@ -11,6 +11,7 @@ use socket::{SocketHeader, SocketSendError, owned::OwnedSocket};
 
 pub mod interface_manager;
 pub mod socket;
+pub mod well_known;
 
 struct NetStackInner<M: InterfaceManager> {
     sockets: List<SocketHeader>,

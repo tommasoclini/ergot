@@ -121,11 +121,15 @@ where
             if let Some(t) = box_ref.t.take() {
                 Some(t)
             } else {
-                // todo
-                assert!(box_ref.wait.is_none());
+                let new_wake = cx.waker();
+                if let Some(w) = box_ref.wait.take() {
+                    if !w.will_wake(new_wake) {
+                        w.wake();
+                    }
+                }
                 // NOTE: Okay to register waker AFTER checking, because we
                 // have an exclusive lock
-                box_ref.wait = Some(cx.waker().clone());
+                box_ref.wait = Some(new_wake.clone());
                 None
             }
         });
@@ -163,6 +167,7 @@ where
     M: InterfaceManager + 'static,
 {
     fn drop(&mut self) {
+        println!("Dropping OwnedSocketHdl!");
         // first things first, remove the item from the list
         self.net.inner.with_lock(|net| {
             let node: NonNull<OwnedSocket<T>> = self.ptr;
@@ -171,12 +176,6 @@ where
                 net.sockets.remove(node);
             }
         });
-        // now that we are NOT in the list, we can soundly drop the item storage
-        unsafe {
-            let mut node: NonNull<OwnedSocket<T>> = self.ptr;
-            let node_mut: &mut OwnedSocket<T> = node.as_mut();
-            core::ptr::drop_in_place(node_mut.inner.get());
-        }
     }
 }
 
@@ -290,6 +289,14 @@ where
             Ok(())
         } else {
             Err(SocketSendError::DeserFailed)
+        }
+    }
+}
+
+impl<T: Serialize + DeserializeOwned + 'static> Drop for OwnedSocket<T> {
+    fn drop(&mut self) {
+        unsafe {
+            core::ptr::drop_in_place(self.inner.get());
         }
     }
 }

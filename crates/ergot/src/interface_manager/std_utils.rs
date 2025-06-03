@@ -11,6 +11,11 @@ pub(crate) struct OwnedFrame {
     pub(crate) body: Vec<u8>,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ReceiverError {
+    SocketClosed,
+}
+
 pub(crate) fn ser_frame(frame: OwnedFrame) -> Vec<u8> {
     let dst_any = frame.dst.port_id == 0;
     let src = frame.src.as_u32();
@@ -29,7 +34,9 @@ pub(crate) fn ser_frame(frame: OwnedFrame) -> Vec<u8> {
 
     out.extend_from_slice(&postcard::to_stdvec(&seq).unwrap());
     out.extend_from_slice(&frame.body);
-    cobs::encode_vec(&out)
+    let mut out = cobs::encode_vec(&out);
+    out.push(0);
+    out
 }
 
 pub(crate) fn de_frame(remain: &[u8]) -> Option<OwnedFrame> {

@@ -1,8 +1,13 @@
-use ergot::{interface_manager::std_tcp_router::{register_interface, StdTcpIm}, NetStack};
+use ergot::{
+    interface_manager::std_tcp_router::{register_interface, StdTcpIm}, well_known::ErgotPingEndpoint, Address, NetStack
+};
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use tokio::net::TcpListener;
+use tokio::{
+    net::TcpListener,
+    time::{interval, timeout},
+};
 
-use std::io;
+use std::{io, time::Duration};
 
 static STACK: NetStack<CriticalSectionRawMutex, StdTcpIm> = NetStack::new();
 
@@ -10,13 +15,44 @@ static STACK: NetStack<CriticalSectionRawMutex, StdTcpIm> = NetStack::new();
 async fn main() -> io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:2025").await?;
 
+    tokio::task::spawn(ping_all());
+
+    // TODO: Should the library just do this for us? something like
+    // `serve(listener).await`, or just `serve(&STACK, "127.0.0.1:2025").await`?
     loop {
         let (socket, addr) = listener.accept().await?;
         println!("Connect {addr:?}");
         let hdl = register_interface(&STACK, socket).unwrap();
+
         tokio::task::spawn(async move {
             let res = hdl.run().await;
             println!("END: {res:?}");
         });
+    }
+}
+
+async fn ping_all() {
+    let mut ival = interval(Duration::from_secs(3));
+    let mut ctr = 0u32;
+    loop {
+        ival.tick().await;
+        let nets = STACK.with_interface_manager(|im| im.get_nets());
+        println!("Nets to ping: {nets:?}");
+        for net in nets {
+            let pg = ctr;
+            ctr = ctr.wrapping_add(1);
+            let rr = STACK
+                .req_resp::<ErgotPingEndpoint>(
+                    Address {
+                        network_id: net,
+                        node_id: 2,
+                        port_id: 0,
+                    },
+                    pg,
+                );
+            let fut = timeout(Duration::from_millis(100), rr);
+            let res = fut.await;
+            println!("ping {net}.2 w/ {pg}: {res:?}");
+        }
     }
 }

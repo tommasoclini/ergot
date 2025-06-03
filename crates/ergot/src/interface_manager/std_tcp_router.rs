@@ -24,6 +24,7 @@ use crate::{NetStack, interface_manager::std_utils::ser_frame};
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
 use postcard_rpc::Key;
+use tokio::sync::mpsc::Sender;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{
@@ -31,9 +32,10 @@ use tokio::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     select,
-    sync::mpsc::{Receiver, Sender, channel, error::TrySendError},
+    sync::mpsc::{Receiver, channel, error::TrySendError},
 };
 
+use super::std_utils::ReceiverError;
 use super::{
     ConstInit, InterfaceManager, InterfaceSendError,
     std_utils::{
@@ -42,12 +44,6 @@ use super::{
         de_frame,
     },
 };
-
-pub struct StdTcpInterface {
-    net_id: u16,
-    skt_tx: Sender<OwnedFrame>,
-    closer: Arc<WaitQueue>,
-}
 
 pub struct StdTcpRecvHdl<R: ScopedRawMutex + 'static> {
     stack: &'static NetStack<R, StdTcpIm>,
@@ -72,7 +68,10 @@ pub struct StdTcpImInner {
     // TODO: we probably want something like iddqd for a hashset sorted by
     // net_id, as well as a list of "allocated" netids, mapped to the
     // interface they are associated with
-    interfaces: Vec<StdTcpInterface>,
+    //
+    // TODO: for the no-std version of this, we will need to use the same
+    // intrusive list stuff that we use for sockets for holding interfaces.
+    interfaces: Vec<StdTcpTxHdl>,
     seq_no: u16,
     any_closed: bool,
 }
@@ -82,14 +81,13 @@ pub enum Error {
     OutOfNetIds,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum ReceiverError {
-    SocketClosed,
+struct StdTcpTxHdl {
+    net_id: u16,
+    skt_tx: Sender<OwnedFrame>,
+    closer: Arc<WaitQueue>,
 }
 
 // ---- impls ----
-
-// impl StdTcpInterface
 
 // impl StdTcpRecvHdl
 
@@ -139,7 +137,21 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                     FeedResult::Success { data, remaining } => {
                         // Successfully de-cobs'd a packet, now we need to
                         // do something with it.
-                        if let Some(frame) = de_frame(data) {
+                        if let Some(mut frame) = de_frame(data) {
+                            // If the message comes in and has a src net_id of zero,
+                            // we should rewrite it so it isn't later understood as a
+                            // local packet.
+                            if frame.src.network_id == 0 {
+                                assert_ne!(frame.src.node_id, 0, "we got a local packet remotely?");
+                                assert_ne!(frame.src.node_id, 1, "someone is pretending to be us?");
+
+                                frame.src.network_id = self.net_id;
+                            }
+                            // TODO: if the destination IS self.net_id, we could rewrite the
+                            // dest net_id as zero to avoid a pass through the interface manager.
+                            //
+                            // If the dest is 0, should we rewrite the dest as self.net_id? This
+                            // is the opposite as above, but I dunno how that will work with responses
                             let res = self.stack.send_raw(
                                 frame.src,
                                 frame.dst,
@@ -174,6 +186,11 @@ impl StdTcpIm {
             init: false,
             inner: UnsafeCell::new(MaybeUninit::uninit()),
         }
+    }
+
+    pub fn get_nets(&mut self) -> Vec<u16> {
+        let inner = self.get_or_init_inner();
+        inner.interfaces.iter().map(|i| i.net_id).collect()
     }
 
     fn get_or_init_inner(&mut self) -> &mut StdTcpImInner {
@@ -322,8 +339,9 @@ impl StdTcpImInner {
             // todo: configurable channel depth
             let (ctx, crx) = channel(64);
             let net_id = 1;
+            // TODO: We are spawning in a non-async context!
             tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
-            self.interfaces.push(StdTcpInterface {
+            self.interfaces.push(StdTcpTxHdl {
                 net_id,
                 skt_tx: ctx,
                 closer: closer.clone(),
@@ -365,7 +383,7 @@ impl StdTcpImInner {
         println!("allocated net_id {net_id}");
 
         tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
-        self.interfaces.push(StdTcpInterface {
+        self.interfaces.push(StdTcpTxHdl {
             net_id,
             skt_tx: ctx,
             closer: closer.clone(),
