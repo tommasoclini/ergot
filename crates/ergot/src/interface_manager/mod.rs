@@ -2,7 +2,10 @@ use postcard_rpc::Key;
 use serde::Serialize;
 use crate::Address;
 
+pub mod null;
+pub mod std_tcp_client;
 pub mod std_tcp_router;
+pub mod std_utils;
 
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -46,42 +49,4 @@ pub trait InterfaceManager {
         key: Option<Key>,
         data: &[u8],
     ) -> Result<(), InterfaceSendError>;
-}
-
-pub struct NullInterfaceManager {
-    _priv: (),
-}
-
-impl ConstInit for NullInterfaceManager {
-    const INIT: Self = Self { _priv: () };
-}
-
-impl InterfaceManager for NullInterfaceManager {
-    fn send<T: Serialize>(
-        &mut self,
-        _src: Address,
-        dst: Address,
-        _key: Option<Key>,
-        _data: &T,
-    ) -> Result<(), InterfaceSendError> {
-        if dst.net_node_any() {
-            Err(InterfaceSendError::DestinationLocal)
-        } else {
-            Err(InterfaceSendError::PlaceholderOhNo)
-        }
-    }
-
-    fn send_raw(
-        &mut self,
-        _src: Address,
-        dst: Address,
-        _key: Option<Key>,
-        _data: &[u8],
-    ) -> Result<(), InterfaceSendError> {
-        if dst.net_node_any() {
-            Err(InterfaceSendError::DestinationLocal)
-        } else {
-            Err(InterfaceSendError::PlaceholderOhNo)
-        }
-    }
 }

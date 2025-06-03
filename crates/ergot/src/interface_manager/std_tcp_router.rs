@@ -19,30 +19,53 @@
 use std::sync::Arc;
 use std::{cell::UnsafeCell, mem::MaybeUninit};
 
-use crate::{Address, NetStack};
-use acc::{CobsAccumulator, FeedResult};
+use crate::{NetStack, interface_manager::std_utils::ser_frame};
+
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
 use postcard_rpc::Key;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{
         TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     select,
-    sync::mpsc::error::TrySendError,
+    sync::mpsc::{Receiver, Sender, channel, error::TrySendError},
 };
 
-use super::{ConstInit, InterfaceManager, InterfaceSendError};
+use super::{
+    ConstInit, InterfaceManager, InterfaceSendError,
+    std_utils::{
+        OwnedFrame,
+        acc::{CobsAccumulator, FeedResult},
+        de_frame,
+    },
+};
+
+pub struct StdTcpInterface {
+    net_id: u16,
+    skt_tx: Sender<OwnedFrame>,
+    closer: Arc<WaitQueue>,
+}
+
+pub struct StdTcpRecvHdl<R: ScopedRawMutex + 'static> {
+    stack: &'static NetStack<R, StdTcpIm>,
+    // TODO: when we have more real networking and we could possibly
+    // have conflicting net_id assignments, we might need to have a
+    // shared ref to an Arc<AtomicU16> or something for net_id?
+    //
+    // for now, stdtcp assumes it is the only "seed" router, meaning that
+    // it is solely in charge of assigning netids
+    net_id: u16,
+    skt: OwnedReadHalf,
+    closer: Arc<WaitQueue>,
+}
 
 pub struct StdTcpIm {
     init: bool,
     inner: UnsafeCell<MaybeUninit<StdTcpImInner>>,
 }
-
-unsafe impl Sync for StdTcpIm {}
 
 #[derive(Default)]
 pub struct StdTcpImInner {
@@ -54,162 +77,96 @@ pub struct StdTcpImInner {
     any_closed: bool,
 }
 
-struct OwnedFrame {
-    src: Address,
-    dst: Address,
-    seq: u16,
-    key: Option<Key>,
-    body: Vec<u8>,
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    OutOfNetIds,
 }
 
-fn ser_frame(frame: OwnedFrame) -> Vec<u8> {
-    let dst_any = frame.dst.port_id == 0;
-    let src = frame.src.as_u32();
-    let dst = frame.dst.as_u32();
-    let seq = frame.seq;
-
-    let mut out = vec![];
-    // TODO: This is bad and does a ton of allocs. yolo
-    //
-    out.extend_from_slice(&postcard::to_stdvec(&src).unwrap());
-    out.extend_from_slice(&postcard::to_stdvec(&dst).unwrap());
-    if dst_any {
-        let key = frame.key.unwrap();
-        out.extend_from_slice(&postcard::to_stdvec(&key).unwrap());
-    }
-
-    out.extend_from_slice(&postcard::to_stdvec(&seq).unwrap());
-    out.extend_from_slice(&frame.body);
-    cobs::encode_vec(&out)
+#[derive(Debug, PartialEq)]
+pub enum ReceiverError {
+    SocketClosed,
 }
 
-fn de_frame(remain: &[u8]) -> Option<OwnedFrame> {
-    let (src_word, remain) = postcard::take_from_bytes::<u32>(remain).ok()?;
-    let src = Address::from_word(src_word);
-    let (dst_word, remain) = postcard::take_from_bytes::<u32>(remain).ok()?;
-    let dst = Address::from_word(dst_word);
-    let (key, remain) = if dst.port_id == 0 {
-        let (k, r) = postcard::take_from_bytes::<Key>(remain).ok()?;
-        (Some(k), r)
-    } else {
-        (None, remain)
-    };
+// ---- impls ----
 
-    let (seq, remain) = postcard::take_from_bytes::<u16>(remain).ok()?;
-    let body = remain.to_vec();
+// impl StdTcpInterface
 
-    Some(OwnedFrame {
-        src,
-        dst,
-        seq,
-        key,
-        body,
-    })
-}
+// impl StdTcpRecvHdl
 
-async fn tx_worker(
-    net_id: u16,
-    mut tx: OwnedWriteHalf,
-    mut rx: Receiver<OwnedFrame>,
-    closer: Arc<WaitQueue>,
-) {
-    println!("Started tx_worker for net_id {net_id}");
-    loop {
-        let rxf = rx.recv();
-        let clf = closer.wait();
-
-        let frame = select! {
-            r = rxf => {
-                if let Some(frame) = r {
-                    frame
-                } else {
-                    println!("tx_worker {net_id} rx closed!");
-                    closer.close();
-                    break;
-                }
-            }
-            _c = clf => {
-                break;
-            }
-        };
-
-        let msg = ser_frame(frame);
-        println!("sending pkt len:{} on net_id {net_id}", msg.len());
-        let res = tx.write_all(&msg).await;
-        if let Err(e) = res {
-            println!("Err: {e:?}");
-            break;
-        }
-    }
-    // TODO: GC waker?
-    println!("Closing interface {net_id}");
-}
-
-impl StdTcpImInner {
-    pub fn alloc_intfc(&mut self, tx: OwnedWriteHalf) -> Option<(u16, Arc<WaitQueue>)> {
-        let closer = Arc::new(WaitQueue::new());
-        if self.interfaces.is_empty() {
-            // todo: configurable channel depth
-            let (ctx, crx) = channel(64);
-            let net_id = 1;
-            tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
-            self.interfaces.push(StdTcpInterface {
-                net_id,
-                skt_tx: ctx,
-                closer: closer.clone(),
-            });
-            println!("Alloc'd net_id 1");
-            return Some((net_id, closer));
-        } else if self.interfaces.len() >= 65534 {
-            println!("Out of netids!");
-            return None;
-        }
-
-        // If we closed any interfaces, then collect
-        if self.any_closed {
-            self.interfaces.retain(|int| {
-                let closed = int.closer.is_closed();
-                if closed {
-                    println!("Collecting interface {}", int.net_id);
-                }
-                !closed
-            });
-        }
-
-        let mut net_id = 1;
-        // we're not empty, find the lowest free address by counting the
-        // indexes, and if we find a discontinuity, allocate the first one.
-        for intfc in self.interfaces.iter() {
-            if intfc.net_id > net_id {
-                println!("Found gap: {net_id}");
-                break;
-            }
-            debug_assert!(intfc.net_id == net_id);
-            net_id += 1;
-        }
-        // EITHER: We've found a gap that we can use, OR we've iterated all
-        // interfaces, which means that we had contiguous allocations but we
-        // have not exhausted the range.
-        debug_assert!(net_id > 0 && net_id != u16::MAX);
-        let (ctx, crx) = channel(64);
-        println!("allocated net_id {net_id}");
-
-        tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
-        self.interfaces.push(StdTcpInterface {
-            net_id,
-            skt_tx: ctx,
-            closer: closer.clone(),
+impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
+    pub async fn run(mut self) -> Result<(), ReceiverError> {
+        let res = self.run_inner().await;
+        self.closer.close();
+        // todo: this could live somewhere else?
+        self.stack.with_interface_manager(|im| {
+            let inner = im.get_or_init_inner();
+            inner.any_closed = true;
         });
-        self.interfaces.sort_unstable_by_key(|i| i.net_id);
-        Some((net_id, closer))
+        res
+    }
+
+    pub async fn run_inner(&mut self) -> Result<(), ReceiverError> {
+        let mut cobs_buf = CobsAccumulator::new(1024 * 1024);
+        let mut raw_buf = [0u8; 4096];
+
+        loop {
+            let rd = self.skt.read(&mut raw_buf);
+            let close = self.closer.wait();
+
+            let ct = select! {
+                r = rd => {
+                    match r {
+                        Ok(0) | Err(_) => {
+                            println!("recv run {} closed", self.net_id);
+                            return Err(ReceiverError::SocketClosed)
+                        },
+                        Ok(ct) => ct,
+                    }
+                }
+                _c = close => {
+                    return Err(ReceiverError::SocketClosed);
+                }
+            };
+
+            let buf = &raw_buf[..ct];
+            let mut window = buf;
+
+            'cobs: while !window.is_empty() {
+                window = match cobs_buf.feed_raw(window) {
+                    FeedResult::Consumed => break 'cobs,
+                    FeedResult::OverFull(new_wind) => new_wind,
+                    FeedResult::DeserError(new_wind) => new_wind,
+                    FeedResult::Success { data, remaining } => {
+                        // Successfully de-cobs'd a packet, now we need to
+                        // do something with it.
+                        if let Some(frame) = de_frame(data) {
+                            let res = self.stack.send_raw(
+                                frame.src,
+                                frame.dst,
+                                frame.key,
+                                &frame.body,
+                                Some(frame.seq),
+                            );
+                            match res {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    // TODO: match on error, potentially try to send NAK?
+                                    panic!("recv->send error: {e:?}");
+                                }
+                            }
+                        } else {
+                            println!("Decode error! Ignoring frame on net_id {}", self.net_id);
+                        }
+
+                        remaining
+                    }
+                };
+            }
+        }
     }
 }
 
-pub struct StdTcpInterface {
-    net_id: u16,
-    skt_tx: Sender<OwnedFrame>,
-    closer: Arc<WaitQueue>,
-}
+// impl StdTcpIm
 
 impl StdTcpIm {
     const fn new() -> Self {
@@ -229,17 +186,6 @@ impl StdTcpIm {
             imr
         }
     }
-}
-
-impl Default for StdTcpIm {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ConstInit for StdTcpIm {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const INIT: Self = Self::new();
 }
 
 impl InterfaceManager for StdTcpIm {
@@ -354,96 +300,119 @@ impl InterfaceManager for StdTcpIm {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Error {
-    OutOfNetIds,
-}
-
-pub struct StdTcpRecvHdl<R: ScopedRawMutex + 'static> {
-    stack: &'static NetStack<R, StdTcpIm>,
-    // TODO: when we have more real networking and we could possibly
-    // have conflicting net_id assignments, we might need to have a
-    // shared ref to an Arc<AtomicU16> or something for net_id?
-    //
-    // for now, stdtcp assumes it is the only "seed" router, meaning that
-    // it is solely in charge of assigning netids
-    net_id: u16,
-    skt: OwnedReadHalf,
-    closer: Arc<WaitQueue>,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ReceiverError {
-    SocketClosed,
-}
-
-impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
-    pub async fn run(mut self) -> Result<(), ReceiverError> {
-        let res = self.run_inner().await;
-        self.closer.close();
-        // todo: this could live somewhere else?
-        self.stack.with_interface_manager(|im| {
-            let inner = im.get_or_init_inner();
-            inner.any_closed = true;
-        });
-        res
+impl Default for StdTcpIm {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    pub async fn run_inner(&mut self) -> Result<(), ReceiverError> {
-        let mut cobs_buf = CobsAccumulator::new(1024 * 1024);
-        let mut raw_buf = [0u8; 4096];
+impl ConstInit for StdTcpIm {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: Self = Self::new();
+}
 
-        loop {
-            let rd = self.skt.read(&mut raw_buf);
-            let close = self.closer.wait();
+unsafe impl Sync for StdTcpIm {}
 
-            let ct = select! {
-                r = rd => {
-                    match r {
-                        Ok(0) | Err(_) => {
-                            println!("recv run {} closed", self.net_id);
-                            return Err(ReceiverError::SocketClosed)
-                        },
-                        Ok(ct) => ct,
-                    }
+// impl StdTcpImInner
+
+impl StdTcpImInner {
+    pub fn alloc_intfc(&mut self, tx: OwnedWriteHalf) -> Option<(u16, Arc<WaitQueue>)> {
+        let closer = Arc::new(WaitQueue::new());
+        if self.interfaces.is_empty() {
+            // todo: configurable channel depth
+            let (ctx, crx) = channel(64);
+            let net_id = 1;
+            tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
+            self.interfaces.push(StdTcpInterface {
+                net_id,
+                skt_tx: ctx,
+                closer: closer.clone(),
+            });
+            println!("Alloc'd net_id 1");
+            return Some((net_id, closer));
+        } else if self.interfaces.len() >= 65534 {
+            println!("Out of netids!");
+            return None;
+        }
+
+        // If we closed any interfaces, then collect
+        if self.any_closed {
+            self.interfaces.retain(|int| {
+                let closed = int.closer.is_closed();
+                if closed {
+                    println!("Collecting interface {}", int.net_id);
                 }
-                _c = close => {
-                    return Err(ReceiverError::SocketClosed);
-                }
-            };
+                !closed
+            });
+        }
 
-            let buf = &raw_buf[..ct];
-            let mut window = buf;
-
-            'cobs: while !window.is_empty() {
-                window = match cobs_buf.feed_raw(window) {
-                    FeedResult::Consumed => break 'cobs,
-                    FeedResult::OverFull(new_wind) => new_wind,
-                    FeedResult::DeserError(new_wind) => new_wind,
-                    FeedResult::Success { data, remaining } => {
-                        // Successfully de-cobs'd a packet, now we need to
-                        // do something with it.
-                        if let Some(frame) = de_frame(data) {
-                            let res =
-                                self.stack
-                                    .send_raw(frame.src, frame.dst, frame.key, &frame.body, Some(frame.seq));
-                            match res {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    // TODO: match on error, potentially try to send NAK?
-                                    panic!("recv->send error: {e:?}");
-                                }
-                            }
-                        } else {
-                            println!("Decode error! Ignoring frame on net_id {}", self.net_id);
-                        }
-
-                        remaining
-                    }
-                };
+        let mut net_id = 1;
+        // we're not empty, find the lowest free address by counting the
+        // indexes, and if we find a discontinuity, allocate the first one.
+        for intfc in self.interfaces.iter() {
+            if intfc.net_id > net_id {
+                println!("Found gap: {net_id}");
+                break;
             }
+            debug_assert!(intfc.net_id == net_id);
+            net_id += 1;
+        }
+        // EITHER: We've found a gap that we can use, OR we've iterated all
+        // interfaces, which means that we had contiguous allocations but we
+        // have not exhausted the range.
+        debug_assert!(net_id > 0 && net_id != u16::MAX);
+        let (ctx, crx) = channel(64);
+        println!("allocated net_id {net_id}");
+
+        tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
+        self.interfaces.push(StdTcpInterface {
+            net_id,
+            skt_tx: ctx,
+            closer: closer.clone(),
+        });
+        self.interfaces.sort_unstable_by_key(|i| i.net_id);
+        Some((net_id, closer))
+    }
+}
+
+// Helper functions
+
+async fn tx_worker(
+    net_id: u16,
+    mut tx: OwnedWriteHalf,
+    mut rx: Receiver<OwnedFrame>,
+    closer: Arc<WaitQueue>,
+) {
+    println!("Started tx_worker for net_id {net_id}");
+    loop {
+        let rxf = rx.recv();
+        let clf = closer.wait();
+
+        let frame = select! {
+            r = rxf => {
+                if let Some(frame) = r {
+                    frame
+                } else {
+                    println!("tx_worker {net_id} rx closed!");
+                    closer.close();
+                    break;
+                }
+            }
+            _c = clf => {
+                break;
+            }
+        };
+
+        let msg = ser_frame(frame);
+        println!("sending pkt len:{} on net_id {net_id}", msg.len());
+        let res = tx.write_all(&msg).await;
+        if let Err(e) = res {
+            println!("Err: {e:?}");
+            break;
         }
     }
+    // TODO: GC waker?
+    println!("Closing interface {net_id}");
 }
 
 pub fn register_interface<R: ScopedRawMutex>(
@@ -464,115 +433,4 @@ pub fn register_interface<R: ScopedRawMutex>(
             Err(Error::OutOfNetIds)
         }
     })
-}
-
-mod acc {
-    //! Basically postcard's cobs accumulator, but without the deser part
-
-
-    pub struct CobsAccumulator {
-        buf: Box<[u8]>,
-        idx: usize,
-    }
-
-    /// The result of feeding the accumulator.
-    pub enum FeedResult<'input, 'buf> {
-        /// Consumed all data, still pending.
-        Consumed,
-
-        /// Buffer was filled. Contains remaining section of input, if any.
-        OverFull(&'input [u8]),
-
-        /// Reached end of chunk, but deserialization failed. Contains remaining section of input, if.
-        /// any
-        DeserError(&'input [u8]),
-
-        Success {
-            /// Decoded data.
-            data: &'buf [u8],
-
-            /// Remaining data left in the buffer after deserializing.
-            remaining: &'input [u8],
-        },
-    }
-
-    impl CobsAccumulator {
-        /// Create a new accumulator.
-        pub fn new(sz: usize) -> Self {
-            CobsAccumulator {
-                buf: vec![0u8; sz].into_boxed_slice(),
-                idx: 0,
-            }
-        }
-
-        /// Appends data to the internal buffer and attempts to deserialize the accumulated data into
-        /// `T`.
-        ///
-        /// This differs from feed, as it allows the `T` to reference data within the internal buffer, but
-        /// mutably borrows the accumulator for the lifetime of the deserialization.
-        /// If `T` does not require the reference, the borrow of `self` ends at the end of the function.
-        pub fn feed_raw<'me, 'input>(
-            &'me mut self,
-            input: &'input [u8],
-        ) -> FeedResult<'input, 'me> {
-            if input.is_empty() {
-                return FeedResult::Consumed;
-            }
-
-            let zero_pos = input.iter().position(|&i| i == 0);
-            let max_len = self.buf.len();
-
-            if let Some(n) = zero_pos {
-                // Yes! We have an end of message here.
-                // Add one to include the zero in the "take" portion
-                // of the buffer, rather than in "release".
-                let (take, release) = input.split_at(n + 1);
-
-                // TODO(AJM): We could special case when idx == 0 to avoid copying
-                // into the dest buffer if there's a whole packet in the input
-
-                // Does it fit?
-                if (self.idx + take.len()) <= max_len {
-                    // Aw yiss - add to array
-                    self.extend_unchecked(take);
-
-                    let retval = match cobs::decode_in_place(&mut self.buf[..self.idx]) {
-                        Ok(ct) => FeedResult::Success {
-                            data: &self.buf[..ct],
-                            remaining: release,
-                        },
-                        Err(_) => FeedResult::DeserError(release),
-                    };
-                    self.idx = 0;
-                    retval
-                } else {
-                    self.idx = 0;
-                    FeedResult::OverFull(release)
-                }
-            } else {
-                // Does it fit?
-                if (self.idx + input.len()) > max_len {
-                    // nope
-                    let new_start = max_len - self.idx;
-                    self.idx = 0;
-                    FeedResult::OverFull(&input[new_start..])
-                } else {
-                    // yup!
-                    self.extend_unchecked(input);
-                    FeedResult::Consumed
-                }
-            }
-        }
-
-        /// Extend the internal buffer with the given input.
-        ///
-        /// # Panics
-        ///
-        /// Will panic if the input does not fit in the internal buffer.
-        fn extend_unchecked(&mut self, input: &[u8]) {
-            let new_end = self.idx + input.len();
-            self.buf[self.idx..new_end].copy_from_slice(input);
-            self.idx = new_end;
-        }
-    }
 }

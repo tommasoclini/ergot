@@ -1,7 +1,7 @@
 use std::{pin::pin, time::Duration};
 
 use ergot::{
-    Address, NetStack, interface_manager::NullInterfaceManager,
+    Address, NetStack, interface_manager::null::NullInterfaceManager,
     socket::endpoint::OwnedEndpointSocket,
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
