@@ -81,7 +81,7 @@ where
             hdr: SocketHeader {
                 links: Links::new(),
                 vtable: const { &Self::vtable() },
-                port: UnsafeCell::new(0),
+                port: 0,
                 kind: const { SocketTy::topic_in::<U>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
@@ -93,7 +93,7 @@ where
             hdr: SocketHeader {
                 links: Links::new(),
                 vtable: const { &Self::vtable() },
-                port: UnsafeCell::new(0),
+                port: 0,
                 kind: const { SocketTy::endpoint_req::<E>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
@@ -105,7 +105,7 @@ where
             hdr: SocketHeader {
                 links: Links::new(),
                 vtable: const { &Self::vtable() },
-                port: UnsafeCell::new(0),
+                port: 0,
                 kind: const { SocketTy::endpoint_resp::<E>() },
             },
             inner: UnsafeCell::new(OneBox::new()),

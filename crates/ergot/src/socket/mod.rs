@@ -1,6 +1,5 @@
 use core::any::TypeId;
 use core::ptr::{self, NonNull};
-use std::cell::UnsafeCell;
 
 use cordyceps::{Linked, list::Links};
 use postcard_rpc::{Endpoint, Key, Topic};
@@ -38,7 +37,7 @@ pub enum SocketTy {
 
 pub struct SocketHeader {
     pub(crate) links: Links<SocketHeader>,
-    pub(crate) port: UnsafeCell<u8>,
+    pub(crate) port: u8,
     pub(crate) kind: SocketTy,
     pub(crate) vtable: &'static SocketVTable,
 }

@@ -161,7 +161,7 @@ where
                     for socket in inner.sockets.iter_raw() {
                         let (port, vtable, skt_key) = unsafe {
                             let skt_ref = socket.as_ref();
-                            let port = *skt_ref.port.get();
+                            let port = skt_ref.port;
                             let vtable = skt_ref.vtable.clone();
                             (port, vtable, skt_ref.kind.key())
                         };
@@ -230,7 +230,7 @@ where
                     for socket in inner.sockets.iter_raw() {
                         let (port, vtable, skt_key) = unsafe {
                             let skt_ref = socket.as_ref();
-                            let port = *skt_ref.port.get();
+                            let port = skt_ref.port;
                             let vtable = skt_ref.vtable.clone();
                             (port, vtable, skt_ref.kind.key())
                         };
@@ -285,7 +285,7 @@ where
         })
     }
 
-    pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
+    pub(crate) unsafe fn attach_socket(&'static self, mut node: NonNull<SocketHeader>) -> u8 {
         self.inner.with_lock(|inner| {
             // TODO: smarter than this, do something like littlefs2's "next free block"
             // bitmap thing?
@@ -293,7 +293,7 @@ where
             loop {
                 inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
                 let exists = inner.sockets.iter().any(|s| {
-                    let port = unsafe { *s.port.get() };
+                    let port = s.port;
                     port == inner.port_ctr
                 });
                 if !exists {
@@ -303,7 +303,7 @@ where
                 }
             }
             unsafe {
-                node.as_ref().port.get().write(inner.port_ctr);
+                node.as_mut().port = inner.port_ctr;
             }
 
             inner.sockets.push_front(node);
