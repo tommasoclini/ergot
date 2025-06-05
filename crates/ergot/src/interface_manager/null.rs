@@ -5,7 +5,6 @@ use crate::Address;
 
 use super::{ConstInit, InterfaceManager, InterfaceSendError};
 
-
 pub struct NullInterfaceManager {
     _priv: (),
 }

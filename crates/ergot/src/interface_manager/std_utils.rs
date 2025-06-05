@@ -2,7 +2,6 @@ use postcard_rpc::Key;
 
 use crate::Address;
 
-
 pub(crate) struct OwnedFrame {
     pub(crate) src: Address,
     pub(crate) dst: Address,
@@ -65,7 +64,6 @@ pub(crate) fn de_frame(remain: &[u8]) -> Option<OwnedFrame> {
 
 pub(crate) mod acc {
     //! Basically postcard's cobs accumulator, but without the deser part
-
 
     pub struct CobsAccumulator {
         buf: Box<[u8]>,
@@ -173,4 +171,3 @@ pub(crate) mod acc {
         }
     }
 }
-

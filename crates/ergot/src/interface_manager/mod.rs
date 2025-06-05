@@ -1,6 +1,6 @@
+use crate::Address;
 use postcard_rpc::Key;
 use serde::Serialize;
-use crate::Address;
 
 pub mod null;
 pub mod std_tcp_client;

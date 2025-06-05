@@ -127,7 +127,7 @@ where
             dst,
             E::REQ_KEY,
             req,
-            None
+            None,
         )?;
         // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
         // port ids now?
@@ -182,7 +182,8 @@ where
                                     seq
                                 };
 
-                                (f)(this, body, src, dst, seq_no).map_err(NetStackSendError::SocketSend)
+                                (f)(this, body, src, dst, seq_no)
+                                    .map_err(NetStackSendError::SocketSend)
                             };
                             return res;
                         }

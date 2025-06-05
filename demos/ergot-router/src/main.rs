@@ -9,6 +9,7 @@ use tokio::{
 
 use std::{io, time::Duration};
 
+// Server
 static STACK: NetStack<CriticalSectionRawMutex, StdTcpIm> = NetStack::new();
 
 #[tokio::main]
@@ -56,3 +57,5 @@ async fn ping_all() {
         }
     }
 }
+
+

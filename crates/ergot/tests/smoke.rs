@@ -51,7 +51,13 @@ async fn hello() {
 
             // try sending, should fail
             STACK
-                .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }, None)
+                .send_ty::<Other>(
+                    src,
+                    dst,
+                    OtherEndpoint::REQ_KEY,
+                    Other { a: 345, b: -123 },
+                    None,
+                )
                 .unwrap_err();
             // typed sending works
             STACK
@@ -117,7 +123,13 @@ async fn hello() {
     //
     // Both sends should fail.
     STACK
-        .send_ty::<Other>(src, dst, OtherEndpoint::REQ_KEY, Other { a: 345, b: -123 }, None)
+        .send_ty::<Other>(
+            src,
+            dst,
+            OtherEndpoint::REQ_KEY,
+            Other { a: 345, b: -123 },
+            None,
+        )
         .unwrap_err();
     STACK
         .send_ty::<Example>(

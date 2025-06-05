@@ -37,9 +37,9 @@ pub type SendOwned = fn(
     NonNull<()>,
     // The T ty
     &TypeId,
-    // The dst
+    // The src
     Address,
-    // the src
+    // the dst
     Address,
     // the seq_no
     u16,

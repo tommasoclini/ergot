@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 
 use std::{io, pin::pin, time::Duration};
 
+// Client
 static STACK: NetStack<CriticalSectionRawMutex, StdTcpClientIm> = NetStack::new();
 
 #[tokio::main]
@@ -37,3 +38,5 @@ async fn pingserver() {
         }).await.unwrap();
     }
 }
+
+

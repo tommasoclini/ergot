@@ -25,27 +25,7 @@ pub struct OwnedMessage<T: 'static> {
     pub t: T,
 }
 
-struct OneBox<T: 'static> {
-    wait: Option<Waker>,
-    t: Option<OwnedMessage<T>>,
-}
-
-impl<T: 'static> OneBox<T> {
-    const fn new() -> Self {
-        Self {
-            wait: None,
-            t: None,
-        }
-    }
-}
-
-impl<T: 'static> Default for OneBox<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Owned Endpoint Server Socket
+// Owned Socket
 #[repr(C)]
 pub struct OwnedSocket<T>
 where
@@ -70,33 +50,6 @@ where
     port: u8,
 }
 
-unsafe impl<T, R, M> Send for OwnedSocketHdl<'_, T, R, M>
-where
-    T: Send,
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-}
-
-unsafe impl<T, R, M> Sync for OwnedSocketHdl<'_, T, R, M>
-where
-    T: Send,
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-}
-
-unsafe impl<T, R, M> Sync for Recv<'_, '_, T, R, M>
-where
-    T: Send,
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-}
-
 pub struct Recv<'a, 'b, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
@@ -106,78 +59,18 @@ where
     hdl: &'a mut OwnedSocketHdl<'b, T, R, M>,
 }
 
-impl<T, R, M> Future for Recv<'_, '_, T, R, M>
-where
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-    type Output = OwnedMessage<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let res = self.hdl.net.inner.with_lock(|_net| {
-            let this_ref: &OwnedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
-            let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
-            if let Some(t) = box_ref.t.take() {
-                Some(t)
-            } else {
-                let new_wake = cx.waker();
-                if let Some(w) = box_ref.wait.take() {
-                    if !w.will_wake(new_wake) {
-                        w.wake();
-                    }
-                }
-                // NOTE: Okay to register waker AFTER checking, because we
-                // have an exclusive lock
-                box_ref.wait = Some(new_wake.clone());
-                None
-            }
-        });
-        if let Some(t) = res {
-            Poll::Ready(t)
-        } else {
-            Poll::Pending
-        }
-    }
+struct OneBox<T: 'static> {
+    wait: Option<Waker>,
+    t: Option<OwnedMessage<T>>,
 }
 
-// TODO: impl drop, remove waker, remove socket
-impl<'a, T, R, M> OwnedSocketHdl<'a, T, R, M>
-where
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-    pub fn port(&self) -> u8 {
-        self.port
-    }
+// ---- impls ----
 
-    // TODO: This future is !Send? I don't fully understand why, but rustc complains
-    // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
-    // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
-    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R, M> {
-        Recv { hdl: self }
-    }
-}
+// impl OwnedMessage
 
-impl<T, R, M> Drop for OwnedSocketHdl<'_, T, R, M>
-where
-    T: Serialize + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
-{
-    fn drop(&mut self) {
-        println!("Dropping OwnedSocketHdl!");
-        // first things first, remove the item from the list
-        self.net.inner.with_lock(|net| {
-            let node: NonNull<OwnedSocket<T>> = self.ptr;
-            let node: NonNull<SocketHeader> = node.cast();
-            unsafe {
-                net.sockets.remove(node);
-            }
-        });
-    }
-}
+// ...
+
+// impl OwnedSocket
 
 impl<T> OwnedSocket<T>
 where
@@ -298,5 +191,126 @@ impl<T: Serialize + DeserializeOwned + 'static> Drop for OwnedSocket<T> {
         unsafe {
             core::ptr::drop_in_place(self.inner.get());
         }
+    }
+}
+
+// impl OwnedSocketHdl
+
+// TODO: impl drop, remove waker, remove socket
+impl<'a, T, R, M> OwnedSocketHdl<'a, T, R, M>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+    pub fn port(&self) -> u8 {
+        self.port
+    }
+
+    // TODO: This future is !Send? I don't fully understand why, but rustc complains
+    // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
+    // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
+    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R, M> {
+        Recv { hdl: self }
+    }
+}
+
+impl<T, R, M> Drop for OwnedSocketHdl<'_, T, R, M>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+    fn drop(&mut self) {
+        println!("Dropping OwnedSocketHdl!");
+        // first things first, remove the item from the list
+        self.net.inner.with_lock(|net| {
+            let node: NonNull<OwnedSocket<T>> = self.ptr;
+            let node: NonNull<SocketHeader> = node.cast();
+            unsafe {
+                net.sockets.remove(node);
+            }
+        });
+    }
+}
+
+unsafe impl<T, R, M> Send for OwnedSocketHdl<'_, T, R, M>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+}
+
+unsafe impl<T, R, M> Sync for OwnedSocketHdl<'_, T, R, M>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+}
+
+// impl Recv
+
+impl<T, R, M> Future for Recv<'_, '_, T, R, M>
+where
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+    type Output = OwnedMessage<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let res = self.hdl.net.inner.with_lock(|_net| {
+            let this_ref: &OwnedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
+            let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
+            if let Some(t) = box_ref.t.take() {
+                Some(t)
+            } else {
+                let new_wake = cx.waker();
+                if let Some(w) = box_ref.wait.take() {
+                    if !w.will_wake(new_wake) {
+                        w.wake();
+                    }
+                }
+                // NOTE: Okay to register waker AFTER checking, because we
+                // have an exclusive lock
+                box_ref.wait = Some(new_wake.clone());
+                None
+            }
+        });
+        if let Some(t) = res {
+            Poll::Ready(t)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+unsafe impl<T, R, M> Sync for Recv<'_, '_, T, R, M>
+where
+    T: Send,
+    T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
+{
+}
+
+// impl OneBox
+
+impl<T: 'static> OneBox<T> {
+    const fn new() -> Self {
+        Self {
+            wait: None,
+            t: None,
+        }
+    }
+}
+
+impl<T: 'static> Default for OneBox<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
