@@ -10,12 +10,12 @@ use std::{
 
 use cordyceps::list::Links;
 use mutex::ScopedRawMutex;
-use postcard_rpc::Key;
+use postcard_rpc::{Endpoint, Topic};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Address, NetStack, interface_manager::InterfaceManager};
 
-use super::{SocketHeader, SocketSendError, SocketVTable};
+use super::{SocketHeader, SocketSendError, SocketTy, SocketVTable};
 
 #[derive(Debug, PartialEq)]
 pub struct OwnedMessage<T: 'static> {
@@ -76,13 +76,37 @@ impl<T> OwnedSocket<T>
 where
     T: Serialize + DeserializeOwned + 'static,
 {
-    pub const fn new(key: Key) -> Self {
+    pub const fn new_topic_in<U: Topic>() -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
-                vtable: Self::vtable(),
-                key,
+                vtable: const { &Self::vtable() },
                 port: UnsafeCell::new(0),
+                kind: const { SocketTy::topic_in::<U>() },
+            },
+            inner: UnsafeCell::new(OneBox::new()),
+        }
+    }
+
+    pub const fn new_endpoint_req<E: Endpoint>() -> Self {
+        Self {
+            hdr: SocketHeader {
+                links: Links::new(),
+                vtable: const { &Self::vtable() },
+                port: UnsafeCell::new(0),
+                kind: const { SocketTy::endpoint_req::<E>() },
+            },
+            inner: UnsafeCell::new(OneBox::new()),
+        }
+    }
+
+    pub const fn new_endpoint_resp<E: Endpoint>() -> Self {
+        Self {
+            hdr: SocketHeader {
+                links: Links::new(),
+                vtable: const { &Self::vtable() },
+                port: UnsafeCell::new(0),
+                kind: const { SocketTy::endpoint_resp::<E>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
         }

@@ -3,18 +3,44 @@ use core::ptr::{self, NonNull};
 use std::cell::UnsafeCell;
 
 use cordyceps::{Linked, list::Links};
-use postcard_rpc::Key;
+use postcard_rpc::{Endpoint, Key, Topic};
+use postcard_schema::Schema;
+use postcard_schema::schema::NamedType;
 
 use crate::Address;
 
 pub mod endpoint;
 pub mod owned;
 
+#[derive(Debug)]
+pub struct EndpointData {
+    pub path: &'static str,
+    pub req_key: Key,
+    pub resp_key: Key,
+    pub req_schema: &'static NamedType,
+    pub resp_schema: &'static NamedType,
+}
+
+#[derive(Debug)]
+pub struct TopicData {
+    pub path: &'static str,
+    pub msg_key: Key,
+    pub msg_schema: &'static NamedType,
+}
+
+#[derive(Debug)]
+pub enum SocketTy {
+    EndpointReq(&'static EndpointData),
+    EndpointResp(&'static EndpointData),
+    TopicIn(&'static TopicData),
+    // todo: TopicOut?
+}
+
 pub struct SocketHeader {
     pub(crate) links: Links<SocketHeader>,
-    pub(crate) key: Key,
     pub(crate) port: UnsafeCell<u8>,
-    pub(crate) vtable: SocketVTable, // &Vtable?
+    pub(crate) kind: SocketTy,
+    pub(crate) vtable: &'static SocketVTable,
 }
 
 // TODO: Way of signaling "socket consumed"?
@@ -25,6 +51,16 @@ pub enum SocketSendError {
     DeserFailed,
     TypeMismatch,
     WhatTheHell,
+}
+
+#[derive(Clone)]
+pub struct SocketVTable {
+    pub(crate) send_owned: Option<SendOwned>,
+    pub(crate) send_bor: Option<SendBorrowed>,
+    pub(crate) send_raw: SendRaw,
+    // NOTE: We do *not* have a `drop` impl here, because the list
+    // doesn't ACTUALLY own the nodes, so it is not responsible for dropping
+    // them. They are naturally destroyed by their true owner.
 }
 
 // Morally: &mut ManuallyDrop<T>, TypeOf<T>, src, dst
@@ -73,14 +109,48 @@ pub type SendRaw = fn(
     u16,
 ) -> Result<(), SocketSendError>;
 
-#[derive(Clone)]
-pub struct SocketVTable {
-    pub(crate) send_owned: Option<SendOwned>,
-    pub(crate) send_bor: Option<SendBorrowed>,
-    pub(crate) send_raw: SendRaw,
-    // NOTE: We do *not* have a `drop` impl here, because the list
-    // doesn't ACTUALLY own the nodes, so it is not responsible for dropping
-    // them. They are naturally destroyed by their true owner.
+impl EndpointData {
+    pub const fn for_endpoint<E: Endpoint>() -> Self {
+        Self {
+            path: E::PATH,
+            req_key: E::REQ_KEY,
+            resp_key: E::RESP_KEY,
+            req_schema: E::Request::SCHEMA,
+            resp_schema: E::Response::SCHEMA,
+        }
+    }
+}
+
+impl TopicData {
+    pub const fn for_topic<T: Topic>() -> Self {
+        Self {
+            path: T::PATH,
+            msg_key: T::TOPIC_KEY,
+            msg_schema: T::Message::SCHEMA,
+        }
+    }
+}
+
+impl SocketTy {
+    pub const fn endpoint_req<E: Endpoint>() -> Self {
+        Self::EndpointReq(&const { EndpointData::for_endpoint::<E>() })
+    }
+
+    pub const fn endpoint_resp<E: Endpoint>() -> Self {
+        Self::EndpointResp(&const { EndpointData::for_endpoint::<E>() })
+    }
+
+    pub const fn topic_in<T: Topic>() -> Self {
+        Self::TopicIn(&const { TopicData::for_topic::<T>() })
+    }
+
+    pub fn key(&self) -> Key {
+        match *self {
+            SocketTy::EndpointReq(endpoint_data) => endpoint_data.req_key,
+            SocketTy::EndpointResp(endpoint_data) => endpoint_data.resp_key,
+            SocketTy::TopicIn(topic_data) => topic_data.msg_key,
+        }
+    }
 }
 
 // --------------------------------------------------------------------------

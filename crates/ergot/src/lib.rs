@@ -115,7 +115,7 @@ where
         E::Request: Serialize + DeserializeOwned + 'static,
         E::Response: Serialize + DeserializeOwned + 'static,
     {
-        let resp_sock = OwnedSocket::<E::Response>::new(E::RESP_KEY);
+        let resp_sock = OwnedSocket::new_endpoint_resp::<E>();
         let resp_sock = pin!(resp_sock);
         let mut resp_hdl = resp_sock.attach(self);
         self.send_ty(
@@ -163,7 +163,7 @@ where
                             let skt_ref = socket.as_ref();
                             let port = *skt_ref.port.get();
                             let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.key)
+                            (port, vtable, skt_ref.kind.key())
                         };
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
@@ -232,7 +232,7 @@ where
                             let skt_ref = socket.as_ref();
                             let port = *skt_ref.port.get();
                             let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.key)
+                            (port, vtable, skt_ref.kind.key())
                         };
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.

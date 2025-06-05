@@ -26,7 +26,7 @@ where
 {
     pub const fn new() -> Self {
         Self {
-            sock: OwnedSocket::new(E::REQ_KEY),
+            sock: OwnedSocket::new_endpoint_req::<E>(),
         }
     }
 
