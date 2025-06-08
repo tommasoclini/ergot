@@ -1,7 +1,7 @@
 use ergot::{
     NetStack,
     interface_manager::std_tcp_client::{StdTcpClientIm, register_interface},
-    socket::endpoint::OwnedEndpointSocket,
+    socket::endpoint::StdBoundedEndpointSocket,
     well_known::ErgotPingEndpoint,
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -28,15 +28,16 @@ async fn main() -> io::Result<()> {
 }
 
 async fn pingserver() {
-    let server = OwnedEndpointSocket::<ErgotPingEndpoint>::new();
+    let server = StdBoundedEndpointSocket::<ErgotPingEndpoint>::new(16);
     let server = pin!(server);
     let mut server_hdl = server.attach(&STACK);
     loop {
-        server_hdl.serve(async |req| {
-            println!("Serving ping {req}");
-            req
-        }).await.unwrap();
+        server_hdl
+            .serve(async |req| {
+                println!("Serving ping {req}");
+                req
+            })
+            .await
+            .unwrap();
     }
 }
-
-

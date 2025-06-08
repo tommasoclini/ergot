@@ -10,6 +10,7 @@ use crate::Address;
 
 pub mod endpoint;
 pub mod owned;
+pub mod std_bounded;
 
 #[derive(Debug)]
 pub struct EndpointData {
@@ -60,6 +61,14 @@ pub struct SocketVTable {
     // NOTE: We do *not* have a `drop` impl here, because the list
     // doesn't ACTUALLY own the nodes, so it is not responsible for dropping
     // them. They are naturally destroyed by their true owner.
+}
+
+#[derive(Debug, PartialEq)]
+pub struct OwnedMessage<T: 'static> {
+    pub src: Address,
+    pub dst: Address,
+    pub seq: u16,
+    pub t: T,
 }
 
 // Morally: &mut ManuallyDrop<T>, TypeOf<T>, src, dst

@@ -4,17 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-const-fnv1a-hash = "1.1.0"
-tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }
+cobs                = "0.3.0"
+cordyceps           = "0.3.4"
+pin-project         = "1.1.10"
+postcard-rpc        = "0.11.9"
 
-cordyceps = "0.3.4"
-critical-section = { version = "1.2.0", features = ["std"] }
-mutex = { version = "1.0.0", features = ["std", "impl-critical-section"] }
-pin-project = "1.1.10"
-maitake-sync = { version = "0.2.1", features = ["std"] }
-postcard = { version = "1.1.1", features = ["use-std"] }
-bbq2 = "0.1.0"
-serde = { version = "1.0", features = ["derive"] }
-postcard-rpc = "0.11.9"
-postcard-schema = { version = "0.2.1", features = ["derive"] }
-cobs = "0.3.0"
+critical-section    = { version = "1.2.0",  features = ["std"] }
+maitake-sync        = { version = "0.2.1",  features = ["std"] }
+mutex               = { version = "1.0.0",  features = ["std", "impl-critical-section"] }
+postcard            = { version = "1.1.1",  features = ["use-std"] }
+postcard-schema     = { version = "0.2.1",  features = ["derive"] }
+serde               = { version = "1.0",    features = ["derive"] }
+tokio               = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }

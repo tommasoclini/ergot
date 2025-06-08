@@ -57,16 +57,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bbq2"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5bbde0e5324bc9c282e869a2f544166ac94bbb82b26afd2ca82ac7b0742a89"
-dependencies = [
- "critical-section",
- "maitake-sync",
-]
-
-[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -100,12 +90,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const-fnv1a-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32b13ea120a812beba79e34316b3942a857c86ec1593cb34f27bb28272ce2cca"
-
-[[package]]
 name = "cordyceps"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -137,9 +121,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 name = "ergot"
 version = "0.1.0"
 dependencies = [
- "bbq2",
  "cobs 0.3.0",
- "const-fnv1a-hash",
  "cordyceps",
  "critical-section",
  "maitake-sync",

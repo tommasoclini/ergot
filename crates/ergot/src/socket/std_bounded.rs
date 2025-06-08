@@ -1,6 +1,7 @@
 use core::cell::UnsafeCell;
 use std::{
     any::TypeId,
+    collections::VecDeque,
     marker::PhantomData,
     pin::Pin,
     ptr::NonNull,
@@ -18,7 +19,7 @@ use super::{OwnedMessage, SocketHeader, SocketSendError, SocketTy, SocketVTable}
 
 // Owned Socket
 #[repr(C)]
-pub struct OwnedSocket<T>
+pub struct StdBoundedSocket<T>
 where
     T: Serialize + DeserializeOwned + 'static,
 {
@@ -26,17 +27,17 @@ where
     hdr: SocketHeader,
     // TODO: just a single item, we probably want a more ring-buffery
     // option for this.
-    inner: UnsafeCell<OneBox<T>>,
+    inner: UnsafeCell<BoundedQueue<T>>,
 }
 
-pub struct OwnedSocketHdl<'a, T, R, M>
+pub struct StdBoundedSocketHdl<'a, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub(crate) ptr: NonNull<OwnedSocket<T>>,
-    _lt: PhantomData<Pin<&'a mut OwnedSocket<T>>>,
+    pub(crate) ptr: NonNull<StdBoundedSocket<T>>,
+    _lt: PhantomData<Pin<&'a mut StdBoundedSocket<T>>>,
     pub(crate) net: &'static NetStack<R, M>,
     port: u8,
 }
@@ -47,12 +48,16 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    hdl: &'a mut OwnedSocketHdl<'b, T, R, M>,
+    hdl: &'a mut StdBoundedSocketHdl<'b, T, R, M>,
 }
 
-struct OneBox<T: 'static> {
+struct BoundedQueue<T: 'static> {
     wait: Option<Waker>,
-    t: Option<OwnedMessage<T>>,
+    // TODO: We could probably do better than a VecDeque with a boxed slice
+    // and a ringbuffer, which could maybe also be shared with the std
+    // inline buffer, but for now this is fine.
+    queue: VecDeque<OwnedMessage<T>>,
+    max_len: usize,
 }
 
 // ---- impls ----
@@ -61,13 +66,13 @@ struct OneBox<T: 'static> {
 
 // ...
 
-// impl OwnedSocket
+// impl StdBoundedSocket
 
-impl<T> OwnedSocket<T>
+impl<T> StdBoundedSocket<T>
 where
     T: Serialize + DeserializeOwned + 'static,
 {
-    pub const fn new_topic_in<U: Topic>() -> Self {
+    pub fn new_topic_in<U: Topic>(bound: usize) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -75,11 +80,11 @@ where
                 port: 0,
                 kind: const { SocketTy::topic_in::<U>() },
             },
-            inner: UnsafeCell::new(OneBox::new()),
+            inner: UnsafeCell::new(BoundedQueue::new(bound)),
         }
     }
 
-    pub const fn new_endpoint_req<E: Endpoint>() -> Self {
+    pub fn new_endpoint_req<E: Endpoint>(bound: usize) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -87,11 +92,11 @@ where
                 port: 0,
                 kind: const { SocketTy::endpoint_req::<E>() },
             },
-            inner: UnsafeCell::new(OneBox::new()),
+            inner: UnsafeCell::new(BoundedQueue::new(bound)),
         }
     }
 
-    pub const fn new_endpoint_resp<E: Endpoint>() -> Self {
+    pub fn new_endpoint_resp<E: Endpoint>(bound: usize) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -99,18 +104,18 @@ where
                 port: 0,
                 kind: const { SocketTy::endpoint_resp::<E>() },
             },
-            inner: UnsafeCell::new(OneBox::new()),
+            inner: UnsafeCell::new(BoundedQueue::new(bound)),
         }
     }
 
     pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
         self: Pin<&'a mut Self>,
         stack: &'static NetStack<R, M>,
-    ) -> OwnedSocketHdl<'a, T, R, M> {
+    ) -> StdBoundedSocketHdl<'a, T, R, M> {
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
-        OwnedSocketHdl {
+        StdBoundedSocketHdl {
             ptr: ptr_self,
             _lt: PhantomData,
             net: stack,
@@ -145,13 +150,13 @@ where
         let that: NonNull<T> = that.cast();
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut BoundedQueue<T> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.t.is_some() {
+        if mutitem.queue.len() >= mutitem.max_len {
             return Err(SocketSendError::NoSpace);
         }
 
-        mutitem.t = Some(OwnedMessage {
+        mutitem.queue.push_back(OwnedMessage {
             src,
             dst,
             t: unsafe { that.read() },
@@ -183,14 +188,14 @@ where
     ) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut BoundedQueue<T> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.t.is_some() {
+        if mutitem.queue.len() >= mutitem.max_len {
             return Err(SocketSendError::NoSpace);
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
-            mutitem.t = Some(OwnedMessage { src, dst, t, seq });
+            mutitem.queue.push_back(OwnedMessage { src, dst, t, seq });
             if let Some(w) = mutitem.wait.take() {
                 w.wake();
             }
@@ -201,7 +206,7 @@ where
     }
 }
 
-impl<T: Serialize + DeserializeOwned + 'static> Drop for OwnedSocket<T> {
+impl<T: Serialize + DeserializeOwned + 'static> Drop for StdBoundedSocket<T> {
     fn drop(&mut self) {
         unsafe {
             core::ptr::drop_in_place(self.inner.get());
@@ -209,10 +214,10 @@ impl<T: Serialize + DeserializeOwned + 'static> Drop for OwnedSocket<T> {
     }
 }
 
-// impl OwnedSocketHdl
+// impl StdBoundedSocketHdl
 
 // TODO: impl drop, remove waker, remove socket
-impl<'a, T, R, M> OwnedSocketHdl<'a, T, R, M>
+impl<'a, T, R, M> StdBoundedSocketHdl<'a, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
@@ -223,24 +228,24 @@ where
     }
 
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
-    // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
-    // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
+    // that since `NonNull<StdBoundedSocket<E>>` is !Sync, then this future can't be Send,
+    // BUT impl'ing Sync unsafely on StdBoundedSocketHdl + StdBoundedSocket doesn't seem to help.
     pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R, M> {
         Recv { hdl: self }
     }
 }
 
-impl<T, R, M> Drop for OwnedSocketHdl<'_, T, R, M>
+impl<T, R, M> Drop for StdBoundedSocketHdl<'_, T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
     fn drop(&mut self) {
-        println!("Dropping OwnedSocketHdl!");
+        println!("Dropping StdBoundedSocketHdl!");
         // first things first, remove the item from the list
         self.net.inner.with_lock(|net| {
-            let node: NonNull<OwnedSocket<T>> = self.ptr;
+            let node: NonNull<StdBoundedSocket<T>> = self.ptr;
             let node: NonNull<SocketHeader> = node.cast();
             unsafe {
                 net.sockets.remove(node);
@@ -249,7 +254,7 @@ where
     }
 }
 
-unsafe impl<T, R, M> Send for OwnedSocketHdl<'_, T, R, M>
+unsafe impl<T, R, M> Send for StdBoundedSocketHdl<'_, T, R, M>
 where
     T: Send,
     T: Serialize + DeserializeOwned + 'static,
@@ -258,7 +263,7 @@ where
 {
 }
 
-unsafe impl<T, R, M> Sync for OwnedSocketHdl<'_, T, R, M>
+unsafe impl<T, R, M> Sync for StdBoundedSocketHdl<'_, T, R, M>
 where
     T: Send,
     T: Serialize + DeserializeOwned + 'static,
@@ -279,9 +284,9 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let res = self.hdl.net.inner.with_lock(|_net| {
-            let this_ref: &OwnedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
-            let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
-            if let Some(t) = box_ref.t.take() {
+            let this_ref: &StdBoundedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
+            let box_ref: &mut BoundedQueue<T> = unsafe { &mut *this_ref.inner.get() };
+            if let Some(t) = box_ref.queue.pop_front() {
                 Some(t)
             } else {
                 let new_wake = cx.waker();
@@ -313,19 +318,14 @@ where
 {
 }
 
-// impl OneBox
+// impl BoundedQueue
 
-impl<T: 'static> OneBox<T> {
-    const fn new() -> Self {
+impl<T: 'static> BoundedQueue<T> {
+    fn new(bound: usize) -> Self {
         Self {
             wait: None,
-            t: None,
+            queue: VecDeque::new(),
+            max_len: bound,
         }
-    }
-}
-
-impl<T: 'static> Default for OneBox<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
