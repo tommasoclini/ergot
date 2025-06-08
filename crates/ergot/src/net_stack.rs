@@ -1,3 +1,23 @@
+//! The Ergot NetStack
+//!
+//! The [`NetStack`] is the core of Ergot. It is intended to be placed
+//! in a `static` variable for the duration of your application.
+//!
+//! The Netstack is used directly for a couple of main responsibilities:
+//!
+//! 1. Sending a message, either from user code, or to deliver/forward messages
+//!    received from an interface
+//! 2. Attaching a socket, allowing the NetStack to route messages to it
+//! 3. Interacting with the [interface manager], in order to add/remove
+//!    interfaces, or obtain other information
+//!
+//! [interface manager]: crate::interface_manager
+//!
+//! In general, interacting with anything contained by the [`NetStack`] requires
+//! locking of the [`BlockingMutex`] which protects the inner contents. This
+//! is used both to allow sharing of the inner contents, but also to allow
+//! `Drop` impls to remove themselves from the stack in a blocking manner.
+
 use core::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
 
 use cordyceps::List;
@@ -11,6 +31,7 @@ use crate::{
     socket::{SocketHeader, SocketSendError, owned::OwnedSocket},
 };
 
+/// The Ergot Netstack
 pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
     pub(crate) inner: BlockingMutex<R, NetStackInner<M>>,
 }
@@ -22,6 +43,7 @@ pub(crate) struct NetStackInner<M: InterfaceManager> {
     pub(crate) seq_no: u16,
 }
 
+/// An error from calling a [`NetStack`] "send" method
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NetStackSendError {
@@ -38,6 +60,21 @@ where
     R: ScopedRawMutex + ConstInit,
     M: InterfaceManager + interface_manager::ConstInit,
 {
+    /// Create a new, uninitialized [`NetStack`].
+    ///
+    /// Requires that the [`ScopedRawMutex`] implements the [`mutex::ConstInit`]
+    /// trait, and the [`InterfaceManager`] implements the
+    /// [`interface_manager::ConstInit`] trait.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
+    /// use ergot::NetStack;
+    /// use ergot::interface_manager::null::NullInterfaceManager as NullIM;
+    ///
+    /// static STACK: NetStack<CSRMutex, NullIM> = NetStack::new();
+    /// ```
     pub const fn new() -> Self {
         Self {
             inner: BlockingMutex::new(NetStackInner::new()),
@@ -50,10 +87,94 @@ where
     R: ScopedRawMutex,
     M: InterfaceManager,
 {
+    /// Manually create a new, uninitialized [`NetStack`].
+    ///
+    /// This method is useful if your [`ScopedRawMutex`] or [`InterfaceManager`]
+    /// do not implement their corresponding `ConstInit` trait.
+    ///
+    /// In general, this is most often only needed for `loom` testing, and
+    /// [`NetStack::new()`] should be used when possible.
+    pub const fn const_new(r: R, m: M) -> Self {
+        Self {
+            inner: BlockingMutex::const_new(
+                r,
+                NetStackInner {
+                    sockets: List::new(),
+                    manager: m,
+                    port_ctr: 0,
+                    seq_no: 0,
+                },
+            ),
+        }
+    }
+
+    /// Access the contained [`InterfaceManager`].
+    ///
+    /// Access to the [`InterfaceManager`] is made via the provided closure.
+    /// The [`BlockingMutex`] is locked for the duration of this access,
+    /// inhibiting all other usage of this [`NetStack`].
+    ///
+    /// This can be used to add new interfaces, obtain metadata, or other
+    /// actions supported by the chosen [`InterfaceManager`].
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// # use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
+    /// # use ergot::NetStack;
+    /// # use ergot::interface_manager::null::NullInterfaceManager as NullIM;
+    /// #
+    /// static STACK: NetStack<CSRMutex, NullIM> = NetStack::new();
+    ///
+    /// let res = STACK.with_interface_manager(|im| {
+    ///    // The mutex is locked for the full duration of this closure.
+    ///    # _ = im;
+    ///    // We can return whatever we want from this context, though not
+    ///    // anything borrowed from `im`.
+    ///    42
+    /// });
+    /// assert_eq!(res, 42);
+    /// ```
     pub fn with_interface_manager<F: FnOnce(&mut M) -> U, U>(&'static self, f: F) -> U {
         self.inner.with_lock(|inner| f(&mut inner.manager))
     }
 
+    /// Perform an [`Endpoint`] Request, and await Response.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// # use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
+    /// # use ergot::NetStack;
+    /// # use ergot::interface_manager::null::NullInterfaceManager as NullIM;
+    /// use ergot::Address;
+    /// // Define an example endpoint
+    /// postcard_rpc::endpoint!(Example, u32, i32, "pathho");
+    ///
+    /// static STACKX: NetStack<CSRMutex, NullIM> = NetStack::new();
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     // (not shown: starting an `Example` service...)
+    ///     # let jhdl = tokio::task::spawn(async {
+    ///     #     println!("Serve!");
+    ///     #     let srv = ergot::socket::endpoint::OwnedEndpointSocket::<Example>::new();
+    ///     #     let srv = core::pin::pin!(srv);
+    ///     #     let mut hdl = srv.attach(&STACKX);
+    ///     #     hdl.serve(async |p| p as i32).await.unwrap();
+    ///     #     println!("Served!");
+    ///     # });
+    ///     # // TODO: let the server attach first
+    ///     # tokio::time::sleep(core::time::Duration::from_millis(10)).await;
+    ///     // Make a ping request to local
+    ///     let res = STACKX.req_resp::<Example>(
+    ///         Address::unknown(),
+    ///         42u32,
+    ///     ).await;
+    ///     assert_eq!(res, Ok(42i32));
+    ///     # jhdl.await.unwrap();
+    /// }
+    /// ```
     pub async fn req_resp<E>(
         &'static self,
         dst: Address,
@@ -84,6 +205,11 @@ where
         Ok(resp.t)
     }
 
+    /// Send a raw (pre-serialized) message.
+    ///
+    /// This interface should almost never be used by end-users, and is instead
+    /// typically used by interfaces to feed received messages into the
+    /// [`NetStack`].
     pub fn send_raw(
         &'static self,
         src: Address,
@@ -144,6 +270,14 @@ where
         })
     }
 
+    /// Send a typed message
+    ///
+    /// This is less spicy than `send_raw`, but will likely be deprecated in
+    /// favor of easier-to-hold-right methods like [`Self::req_resp()`]. The
+    /// provided `Key` MUST match the type `T`, e.g. [`Endpoint::REQ_KEY`],
+    /// [`Endpoint::RESP_KEY`], or [`Topic::TOPIC_KEY`].
+    ///
+    /// [`Topic::TOPIC_KEY`]: postcard_rpc::Topic::TOPIC_KEY
     pub fn send_ty<T: 'static + Serialize>(
         &'static self,
         src: Address,

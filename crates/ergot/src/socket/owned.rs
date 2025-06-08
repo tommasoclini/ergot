@@ -67,7 +67,7 @@ impl<T> OwnedSocket<T>
 where
     T: Serialize + DeserializeOwned + 'static,
 {
-    pub const fn new_topic_in<U: Topic>() -> Self {
+    pub const fn new_topic_in<U: Topic<Message = T>>() -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -79,7 +79,7 @@ where
         }
     }
 
-    pub const fn new_endpoint_req<E: Endpoint>() -> Self {
+    pub const fn new_endpoint_req<E: Endpoint<Request = T>>() -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -91,7 +91,7 @@ where
         }
     }
 
-    pub const fn new_endpoint_resp<E: Endpoint>() -> Self {
+    pub const fn new_endpoint_resp<E: Endpoint<Response = T>>() -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
