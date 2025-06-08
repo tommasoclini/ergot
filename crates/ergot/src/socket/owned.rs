@@ -201,14 +201,6 @@ where
     }
 }
 
-impl<T: Serialize + DeserializeOwned + 'static> Drop for OwnedSocket<T> {
-    fn drop(&mut self) {
-        unsafe {
-            core::ptr::drop_in_place(self.inner.get());
-        }
-    }
-}
-
 // impl OwnedSocketHdl
 
 // TODO: impl drop, remove waker, remove socket
