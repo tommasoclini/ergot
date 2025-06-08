@@ -1,7 +1,18 @@
 [package]
 name = "ergot"
-version = "0.1.0"
+version = "0.0.1"
+authors = ["James Munns <james@onevariable.com>"]
 edition = "2024"
+readme = "README.md"
+repository = "https://github.com/jamesmunns/ergot"
+description = "The latest in unsafe network stacks"
+license = "MIT OR Apache-2.0"
+categories = [
+    "embedded",
+    "no-std",
+]
+keywords = []
+documentation = "https://docs.rs/ergot/"
 
 [dependencies]
 cobs                = "0.3.0"
