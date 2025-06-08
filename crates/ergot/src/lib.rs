@@ -1,323 +1,250 @@
-#![allow(clippy::result_unit_err)]
+#![doc = include_str!("../README.md")]
+//!
+//! # Technical Overview
+//!
+//! Ergot is centered around the [`NetStack`]. The `NetStack` is designed to be
+//! a `static`, living for the duration of the firmware/program.
+//!
+//! ## The `NetStack`
+//!
+//! The `NetStack` is the primary interface for *sending* messages, as well as
+//! adding new sockets and interfaces.
+//!
+//! The `NetStack` contains two main items:
+//!
+//! * A list of local sockets
+//! * An Interface Manager, responsible for holding any interfaces the
+//!   `NetStack` may use.
+//!
+//! ### One Main "Trick"
+//!
+//! In general, whenever *multiple* items need to be stored in the `NetStack`,
+//! they should be stored *intrusively*, or as elements in an intrusively linked
+//! list. This allows devices without a heap allocator to effectively handle
+//! a variable number of items.
+//!
+//! Ergot heavily leverages a trick to allow ephemeral items (that may reside
+//! on the stack) to be safely added to a static linked list: It requires that
+//! items added to intrusive lists are [pinned], and that when the pinned items
+//! are dropped, they MUST be removed from the list prior to dropping. This
+//! guarantee is backed by a [`BlockingMutex`], which MUST be held whenever
+//! interacting with the items of a linked list, including in the local context
+//! where the items are defined, and especially including the `Drop` impl of
+//! those items.
+//!
+//! For single core microcontrollers, this has little impact: the mutex is held
+//! whenever access to the stack occurs, and the mutex may not be held across
+//! an await point. For larger system, this may lead to some non-ideal
+//! contention across parallel threads, however it is intended that this mutex
+//! is for as short of a time as possible.
+//!
+//! [`BlockingMutex`]: mutex::BlockingMutex
+//! [pinned]: https://doc.rust-lang.org/std/pin/
+//!
+//! ## The "Sockets"
+//!
+//! Ergot is oriented around type-safe sockets. Rather than TCP/IP sockets,
+//! which provide users with either streams or frames of bytes (e.g. `[u8]`),
+//! Ergot sockets are always of a certain Rust data type, such as structs or
+//! enums. They provide an API very similar to "channels", a common way of
+//! passing data around within Rust programs.
+//!
+//! Ergot leverages the techniques of `postcard`, `postcard-rpc`, and
+//! `postcard-schema` to define types in terms of their serialization schema,
+//! and an 8-byte hash of a type's schema is used as a key to identify that
+//! socket's type.
+//!
+//! When messages are received from outside of the current application/firmware,
+//! messages are deserialized using the `postcard` serialization format, a
+//! compact, non-self-describing, binary format.
+//!
+//! When messages are sent locally within a device, no serialization or
+//! deserialization occurs, meaning that fundamentally sending data to an
+//! Ergot socket locally has no cost over using a normal channel.
+//!
+//! In general: Sockets **receive**, and the NetStack **sends**.
+//!
+//! ### Non-stateful sockets
+//!
+//! Currently, sockets in Ergot are not stateful, meaning that they only serve
+//! to receive messages. Replies may be made by sending a response to the
+//! source address of the received message, using the [`NetStack`] to send
+//! the response.
+//!
+//! Conceptually, this makes Ergot sockets similar to UDP sockets: delivery
+//! is not guaranteed.
+//!
+//! ### A variety of sockets
+//!
+//! Ergot allows for different implementations of what a "socket" is, with
+//! a common subset of functionality. Normally, this might sound like just the
+//! problem to solve with a Rust `trait`, however as we would like to store
+//! all of these items in a single intrusive linked list, this becomes
+//! problematic.
+//!
+//! Instead, the pinned sockets all feature a common socket header, which
+//! includes a hand-crafted vtable used to interact with the socket. This allows
+//! us to have the moral equivalent to `List<dyn Socket>`, but in a way that
+//! is easier to support on embedded devices without an allocator.
+//!
+//! This indirection allows us to be flexible both in intent of a socket, for
+//! example a socket that expects a single one-shot response, or a socket that
+//! expects a stream of requests; as well as flexible in the means of storage
+//! of a socket, for example using stackful bounded queues of message on
+//! embedded systems, or heapful unbounded queues of messages on systems with
+//! an allocator.
+//!
+//! This approach of using a linked list, common header, and vtable, is NEARLY
+//! IDENTICAL to how most async executors operate in Rust, particularly how
+//! Tasks containing differently-typed Futures are handled by the executor
+//! itself when it comes to polling or dropping a Task.
+//!
+//! ### Socket Flavors
+//!
+//! Currently, Ergot aims to support three main kinds of sockets, derived from
+//! `postcard-rpc`'s messaging model:
+//!
+//! * Endpoint Request sockets
+//!   * Used by a "service" to accept incoming requests
+//!   * The "service" will respond with a specific Response type
+//!   * Typically a continuous stream of Requests are expected
+//! * Endpoint Response sockets
+//!   * Used by a "client" to accept a response to an outgoing request
+//!   * Typically receives a single one-shot Response
+//! * Topic-in sockets
+//!   * Still in flux, but aims to receive a stream of incoming Topic messages
+//!   * This is the "sub" part of "pub-sub"
+//!
+//! ## Addressing
+//!
+//! Addresses in Ergot have three main components:
+//!
+//! * A 16-bit **Network ID**
+//! * An 8-bit **Node ID**
+//! * An 8-bit **Socket ID**
+//!
+//! This addressing is similar in form to AppleTalk's addressing. This
+//! addressing is quite different to how TCP/IP IPv4 addressing works.
+//!
+//! ### Network IDs
+//!
+//! Network IDs represent a single "network segment", where all nodes of a
+//! network segment can hear all messages sent on that segment.
+//!
+//! For example, in a point-to-point link (e.g. UART, TCP, USB), that link will
+//! be a single Network ID, containing two nodes. In a bus-style link
+//! (e.g. RS-485, I2C), the bus will be a single Network ID, with one or more
+//! nodes residing on that link.
+//!
+//! The Network ID of "0" is reserved, and is generally used when sending
+//! messages within the local device, or used to mean "the current network
+//! segment" before an interface has discovered the Network ID of the Network
+//! Segment it resides on.
+//!
+//! The Network ID of "65535" is reserved.
+//!
+//! Network IDs are intended to be discovered/negotiated at runtime, and are
+//! not typically hardcoded. The general process of negotiating Network IDs,
+//! particularly across multiple network segment hops, is not yet defined.
+//!
+//! Networks that require more than 65534 network segments are not supported
+//! by Ergot. At that point, you should probably just use IPv4/v6.
+//!
+//! ### Node IDs
+//!
+//! Node IDs represent a single entity on a network segment.
+//!
+//! The Node ID of "0" is reserved, and is generally used when sending messages
+//! within the local device.
+//!
+//! The Node ID of "255" is reserved.
+//!
+//! Network segments that require more than 254 nodes are not supported by
+//! Ergot.
+//!
+//! Network IDs are intended to be discovered/negotiated at runtime, and are
+//! not typically hardcoded. One exception to this is for known point-to-point
+//! network segments that have a defined "controller" and "target" role, such
+//! as USB (where the "host" is the "controller", and the "device" is the
+//! "target"). In these cases, the "controller" typically hardcodes the Node ID
+//! of "1", and the "target" hardcodes the Node ID of "2". This is done to
+//! reduce complexity on these interface implementations.
+//!
+//! ### Socket IDs
+//!
+//! Socket IDs represent a single receiving socket within a [`NetStack`].
+//!
+//! The Socket ID of "0" is reserved, and is generally used as a "wildcard"
+//! when sending messages to a device.
+//!
+//! The Socket ID of "255" is reserved.
+//!
+//! Systems that require more than 254 active sockets are not supported by
+//! Ergot.
+//!
+//! Socket IDs are assigned dynamically by the [`NetStack`], and are never
+//! intended to be hardcoded. Socket IDs may be recycled over time.
+//!
+//! If a device has multiple interfaces, and therefore has multiple (Network ID,
+//! Node ID) tuples that refer to it, the same Socket ID is used on all
+//! interfaces.
+//!
+//! ### Form on the wire
+//!
+//! When serialized into a packet, addresses are encoded with Network ID as the
+//! most significant bytes, and the socket ID as the least significant bytes,
+//! and then varint encoded. This means that in many cases, where "0" is used
+//! for the Network or Node ID, or low numbers are used, Addresses can be
+//! encoded in fewer than 4 bytes on the wire.
+//!
+//! For this reason, when negotiating any ID, lower numbers should be preferred
+//! when possible. Addresses are only encoded as larger than 4 bytes when
+//! addressing a network ID >= 4096.
+//!
+//! ## The Interface Manager
+//!
+//! The [`NetStack`] is generic over an "Interface Manager", which is
+//! responsible for handling any external interfaces of the current program
+//! or device.
+//!
+//! Different interface managers may support a various number of external
+//! interfaces. The simplest interface manager is a "Null Interface Manager",
+//! Which supports no external interfaces, meaning that messages may only be
+//! routed locally.
+//!
+//! The next simplest interface manager is one that only supports zero or one
+//! active interfaces, for example if a device is directly connected to a PC
+//! using USB. In this case, routing is again simple: if messages are not
+//! intended for the local device, they should be routed out of the one external
+//! interface. Similarly, if we support an interface, but it is not connected
+//! (e.g. the USB cable is unplugged), all packets with external destinations
+//! will fail to send.
+//!
+//! For more complex devices, an interface manager with multiple (bounded or
+//! unbounded) interfaces, and more complex routing capabilities, may be
+//! selected.
+//!
+//! Unlike Sockets, which might be various and diverse on all systems, a system
+//! is expected to have one statically-known interface manager, which may
+//! manage various and diverse interfaces. Therefore, the interface manager is
+//! a generic type (unlike sockets), while the interfaces owned by an interface
+//! manager use similar "trick"s like the socket list to handle different
+//! kinds of interfaces (for example, USB on one interface, and RS-485 on
+//! another).
+//!
+//! In general when sending a message, the [`NetStack`] will check if the
+//! message is definitively for the local device (e.g. Net ID = 0, Node ID = 0),
+//! and if not the NetStack will pass the message to the Interface Manager. If
+//! the interface manager can route this packet, it informs the NetStack it has
+//! done so. If the Interface Manager realizes that the packet is still for us
+//! (e.g. matching a Net ID and Node ID of the local device), it may bounce the
+//! message back to the NetStack to locally route.
 
-use std::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
-
-use cordyceps::List;
-use interface_manager::{InterfaceManager, InterfaceSendError};
-use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use postcard_rpc::{Endpoint, Key};
-use serde::{Serialize, de::DeserializeOwned};
-use socket::{SocketHeader, SocketSendError, owned::OwnedSocket};
-
+pub mod address;
 pub mod interface_manager;
+pub mod net_stack;
 pub mod socket;
 pub mod well_known;
 
-struct NetStackInner<M: InterfaceManager> {
-    sockets: List<SocketHeader>,
-    manager: M,
-    port_ctr: u8,
-    seq_no: u16,
-}
-
-impl<M> NetStackInner<M>
-where
-    M: InterfaceManager,
-    M: interface_manager::ConstInit,
-{
-    pub const fn new() -> Self {
-        Self {
-            sockets: List::new(),
-            port_ctr: 0,
-            manager: M::INIT,
-            seq_no: 0,
-        }
-    }
-}
-
-pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
-    inner: BlockingMutex<R, NetStackInner<M>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Address {
-    pub network_id: u16,
-    pub node_id: u8,
-    pub port_id: u8,
-}
-
-impl Address {
-    pub const fn unknown() -> Self {
-        Self {
-            network_id: 0,
-            node_id: 0,
-            port_id: 0,
-        }
-    }
-
-    #[inline]
-    pub fn net_node_any(&self) -> bool {
-        self.network_id == 0 && self.node_id == 0
-    }
-
-    #[inline]
-    pub fn as_u32(&self) -> u32 {
-        ((self.network_id as u32) << 16) | ((self.node_id as u32) << 8) | (self.port_id as u32)
-    }
-
-    #[inline]
-    pub fn from_word(word: u32) -> Self {
-        Self {
-            network_id: (word >> 16) as u16,
-            node_id: (word >> 8) as u8,
-            port_id: word as u8,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum NetStackSendError {
-    SocketSend(SocketSendError),
-    InterfaceSend(InterfaceSendError),
-    NoRoute,
-    AnyPortMissingKey,
-}
-
-impl<R, M> NetStack<R, M>
-where
-    R: ScopedRawMutex + ConstInit,
-    M: InterfaceManager + interface_manager::ConstInit,
-{
-    pub const fn new() -> Self {
-        Self {
-            inner: BlockingMutex::new(NetStackInner::new()),
-        }
-    }
-}
-
-impl<R, M> NetStack<R, M>
-where
-    R: ScopedRawMutex,
-    M: InterfaceManager,
-{
-    pub fn with_interface_manager<F: FnOnce(&mut M) -> U, U>(&'static self, f: F) -> U {
-        self.inner.with_lock(|inner| f(&mut inner.manager))
-    }
-
-    pub async fn req_resp<E>(
-        &'static self,
-        dst: Address,
-        req: E::Request,
-    ) -> Result<E::Response, NetStackSendError>
-    where
-        E: Endpoint,
-        E::Request: Serialize + DeserializeOwned + 'static,
-        E::Response: Serialize + DeserializeOwned + 'static,
-    {
-        let resp_sock = OwnedSocket::new_endpoint_resp::<E>();
-        let resp_sock = pin!(resp_sock);
-        let mut resp_hdl = resp_sock.attach(self);
-        self.send_ty(
-            Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: resp_hdl.port(),
-            },
-            dst,
-            E::REQ_KEY,
-            req,
-            None,
-        )?;
-        // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
-        // port ids now?
-        let resp = resp_hdl.recv().await;
-        Ok(resp.t)
-    }
-
-    pub fn send_raw(
-        &'static self,
-        src: Address,
-        dst: Address,
-        key: Option<Key>,
-        body: &[u8],
-        seq_no: Option<u16>,
-    ) -> Result<(), NetStackSendError> {
-        if dst.port_id == 0 && key.is_none() {
-            return Err(NetStackSendError::AnyPortMissingKey);
-        }
-        let local_bypass = src.net_node_any() && dst.net_node_any();
-
-        self.inner.with_lock(|inner| {
-            let res = if !local_bypass {
-                inner.manager.send_raw(src, dst, key, body)
-            } else {
-                Err(InterfaceSendError::DestinationLocal)
-            };
-
-            match res {
-                Ok(()) => Ok(()),
-                Err(InterfaceSendError::DestinationLocal) => {
-                    for socket in inner.sockets.iter_raw() {
-                        let (port, vtable, skt_key) = unsafe {
-                            let skt_ref = socket.as_ref();
-                            let port = skt_ref.port;
-                            let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.kind.key())
-                        };
-                        // TODO: only allow port_id == 0 if there is only one matching port
-                        // with this key.
-                        if (port == dst.port_id)
-                            || (dst.port_id == 0 && key.is_some_and(|k| k == skt_key))
-                        {
-                            let res = {
-                                let f = vtable.send_raw;
-                                let this: NonNull<SocketHeader> = socket;
-                                let this: NonNull<()> = this.cast();
-                                let seq_no = if let Some(seq) = seq_no {
-                                    seq
-                                } else {
-                                    let seq = inner.seq_no;
-                                    inner.seq_no = inner.seq_no.wrapping_add(1);
-                                    seq
-                                };
-
-                                (f)(this, body, src, dst, seq_no)
-                                    .map_err(NetStackSendError::SocketSend)
-                            };
-                            return res;
-                        }
-                    }
-                    Err(NetStackSendError::NoRoute)
-                }
-                Err(e) => Err(NetStackSendError::InterfaceSend(e)),
-            }
-        })
-    }
-
-    pub fn send_ty<T: 'static + Serialize>(
-        &'static self,
-        src: Address,
-        dst: Address,
-        key: Key,
-        t: T,
-        seq_no: Option<u16>,
-    ) -> Result<(), NetStackSendError> {
-        // Can we assume the destination is local?
-        let local_bypass = src.net_node_any() && dst.net_node_any();
-
-        self.inner.with_lock(|inner| {
-            let res = if !local_bypass {
-                // Not local: offer to the interface manager to send
-                inner.manager.send(src, dst, Some(key), &t)
-            } else {
-                // just skip to local sending
-                Err(InterfaceSendError::DestinationLocal)
-            };
-
-            match res {
-                // We sent it via the interface, all done. T is dropped naturally
-                Ok(()) => Ok(()),
-                Err(InterfaceSendError::DestinationLocal) => {
-                    // Sending to a local interface means a potential move. Create a
-                    // manuallydrop, if a send succeeds, then we have "moved from" here
-                    // into the destination. If no send succeeds (e.g. no socket match
-                    // or sending to the socket failed) then we will need to drop the
-                    // value ourselves.
-                    let mut t = ManuallyDrop::new(t);
-
-                    // Check each socket to see if we want to send it there...
-                    for socket in inner.sockets.iter_raw() {
-                        let (port, vtable, skt_key) = unsafe {
-                            let skt_ref = socket.as_ref();
-                            let port = skt_ref.port;
-                            let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.kind.key())
-                        };
-                        // TODO: only allow port_id == 0 if there is only one matching port
-                        // with this key.
-                        if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
-                            let res = if let Some(f) = vtable.send_owned {
-                                let this: NonNull<SocketHeader> = socket;
-                                let this: NonNull<()> = this.cast();
-                                let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
-                                let that: NonNull<()> = that.cast();
-                                let seq_no = if let Some(seq) = seq_no {
-                                    seq
-                                } else {
-                                    let seq = inner.seq_no;
-                                    inner.seq_no = inner.seq_no.wrapping_add(1);
-                                    seq
-                                };
-                                (f)(this, that, &TypeId::of::<T>(), src, dst, seq_no)
-                                    .map_err(NetStackSendError::SocketSend)
-                            } else if let Some(_f) = vtable.send_bor {
-                                // TODO: if we support send borrowed, then we need to
-                                // drop the manuallydrop here, success or failure.
-                                todo!()
-                            } else {
-                                // todo: keep going? If we found the "right" destination and
-                                // sending fails, then there's not much we can do. Probably: there
-                                // is no case where a socket has NEITHER send_owned NOR send_bor,
-                                // can we make this state impossible instead?
-                                Err(NetStackSendError::SocketSend(SocketSendError::WhatTheHell))
-                            };
-
-                            // If sending failed, we did NOT move the T, which means it's on us
-                            // to drop it.
-                            if res.is_err() {
-                                unsafe {
-                                    ManuallyDrop::drop(&mut t);
-                                }
-                            }
-                            return res;
-                        }
-                    }
-
-                    // We reached the end of sockets. We need to drop this item.
-                    unsafe {
-                        ManuallyDrop::drop(&mut t);
-                    }
-                    Err(NetStackSendError::NoRoute)
-                }
-                Err(e) => Err(NetStackSendError::InterfaceSend(e)),
-            }
-        })
-    }
-
-    pub(crate) unsafe fn attach_socket(&'static self, mut node: NonNull<SocketHeader>) -> u8 {
-        self.inner.with_lock(|inner| {
-            // TODO: smarter than this, do something like littlefs2's "next free block"
-            // bitmap thing?
-            let start = inner.port_ctr;
-            loop {
-                inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
-                let exists = inner.sockets.iter().any(|s| {
-                    let port = s.port;
-                    port == inner.port_ctr
-                });
-                if !exists {
-                    break;
-                } else if inner.port_ctr == start {
-                    panic!("exhausted all addrs");
-                }
-            }
-            unsafe {
-                node.as_mut().port = inner.port_ctr;
-            }
-
-            inner.sockets.push_front(node);
-            inner.port_ctr
-        })
-    }
-}
-
-impl<R, M> Default for NetStack<R, M>
-where
-    R: ScopedRawMutex + ConstInit,
-    M: InterfaceManager + interface_manager::ConstInit,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use address::Address;
+pub use net_stack::{NetStack, NetStackSendError};

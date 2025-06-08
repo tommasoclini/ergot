@@ -144,11 +144,9 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "ergot"
-version = "0.1.0"
+version = "0.0.2"
 dependencies = [
- "bbq2",
  "cobs 0.3.0",
- "const-fnv1a-hash",
  "cordyceps",
  "critical-section",
  "maitake-sync",
