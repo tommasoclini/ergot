@@ -248,3 +248,12 @@ pub mod well_known;
 
 pub use address::Address;
 pub use net_stack::{NetStack, NetStackSendError};
+use postcard_rpc::Key;
+
+#[derive(Debug, Clone)]
+pub struct Header {
+    pub src: Address,
+    pub dst: Address,
+    pub key: Option<Key>,
+    pub seq_no: Option<u16>,
+}

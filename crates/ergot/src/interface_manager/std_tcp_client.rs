@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::{
-    NetStack,
+    Header, NetStack,
     interface_manager::std_utils::{OwnedFrame, ser_frame},
 };
 
@@ -78,9 +78,7 @@ impl ConstInit for StdTcpClientIm {
 impl InterfaceManager for StdTcpClientIm {
     fn send<T: serde::Serialize>(
         &mut self,
-        mut src: crate::Address,
-        dst: crate::Address,
-        key: Option<postcard_rpc::Key>,
+        mut hdr: Header,
         data: &T,
     ) -> Result<(), InterfaceSendError> {
         let Some(intfc) = self.inner.as_mut() else {
@@ -97,26 +95,26 @@ impl InterfaceManager for StdTcpClientIm {
         // shared logic, or handled by the stack somehow?
         //
         // TODO: Assumption: "we" are always node_id==2
-        if dst.network_id == intfc.net_id && dst.node_id == 2 {
+        if hdr.dst.network_id == intfc.net_id && hdr.dst.node_id == 2 {
             return Err(InterfaceSendError::DestinationLocal);
         }
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
-        if src.net_node_any() {
+        if hdr.src.net_node_any() {
             // todo: if we know the destination is EXACTLY this network,
             // we could leave the network_id local to allow for shorter
             // addresses
-            src.network_id = intfc.net_id;
-            src.node_id = 2;
+            hdr.src.network_id = intfc.net_id;
+            hdr.src.node_id = 2;
         }
 
         let seq_no = self.seq_no;
         self.seq_no = self.seq_no.wrapping_add(1);
         let res = intfc.interface.skt_tx.try_send(OwnedFrame {
-            src,
-            dst,
+            src: hdr.src,
+            dst: hdr.dst,
             seq: seq_no,
-            key,
+            key: hdr.key,
             body: postcard::to_stdvec(data).unwrap(),
         });
         match res {
@@ -131,13 +129,7 @@ impl InterfaceManager for StdTcpClientIm {
         }
     }
 
-    fn send_raw(
-        &mut self,
-        mut src: crate::Address,
-        dst: crate::Address,
-        key: Option<postcard_rpc::Key>,
-        data: &[u8],
-    ) -> Result<(), InterfaceSendError> {
+    fn send_raw(&mut self, mut hdr: Header, data: &[u8]) -> Result<(), InterfaceSendError> {
         let Some(intfc) = self.inner.as_mut() else {
             return Err(InterfaceSendError::NoRouteToDest);
         };
@@ -152,26 +144,26 @@ impl InterfaceManager for StdTcpClientIm {
         // shared logic, or handled by the stack somehow?
         //
         // TODO: Assumption: "we" are always node_id==2
-        if dst.network_id == intfc.net_id && dst.node_id == 2 {
+        if hdr.dst.network_id == intfc.net_id && hdr.dst.node_id == 2 {
             return Err(InterfaceSendError::DestinationLocal);
         }
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
-        if src.net_node_any() {
+        if hdr.src.net_node_any() {
             // todo: if we know the destination is EXACTLY this network,
             // we could leave the network_id local to allow for shorter
             // addresses
-            src.network_id = intfc.net_id;
-            src.node_id = 2;
+            hdr.src.network_id = intfc.net_id;
+            hdr.src.node_id = 2;
         }
 
         let seq_no = self.seq_no;
         self.seq_no = self.seq_no.wrapping_add(1);
         let res = intfc.interface.skt_tx.try_send(OwnedFrame {
-            src,
-            dst,
+            src: hdr.src,
+            dst: hdr.dst,
             seq: seq_no,
-            key,
+            key: hdr.key,
             body: data.to_vec(),
         });
         match res {
@@ -272,13 +264,13 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let res = self.stack.send_raw(
-                                frame.src,
-                                frame.dst,
-                                frame.key,
-                                &frame.body,
-                                Some(frame.seq),
-                            );
+                            let hdr = Header {
+                                src: frame.src,
+                                dst: frame.dst,
+                                key: frame.key,
+                                seq_no: Some(frame.seq),
+                            };
+                            let res = self.stack.send_raw(hdr, &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {

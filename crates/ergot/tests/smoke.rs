@@ -1,7 +1,7 @@
 use std::{pin::pin, time::Duration};
 
 use ergot::{
-    Address, NetStack, interface_manager::null::NullInterfaceManager,
+    Address, Header, NetStack, interface_manager::null::NullInterfaceManager,
     socket::endpoint::OwnedEndpointSocket,
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -52,21 +52,25 @@ async fn hello() {
             // try sending, should fail
             STACK
                 .send_ty::<Other>(
-                    src,
-                    dst,
-                    OtherEndpoint::REQ_KEY,
+                    Header {
+                        src,
+                        dst,
+                        key: Some(OtherEndpoint::REQ_KEY),
+                        seq_no: None,
+                    },
                     Other { a: 345, b: -123 },
-                    None,
                 )
                 .unwrap_err();
             // typed sending works
             STACK
                 .send_ty::<Example>(
-                    src,
-                    dst,
-                    ExampleEndpoint::REQ_KEY,
+                    Header {
+                        src,
+                        dst,
+                        key: Some(ExampleEndpoint::REQ_KEY),
+                        seq_no: None,
+                    },
                     Example { a: 42, b: 789 },
-                    None,
                 )
                 .unwrap();
             // raw sending works
@@ -75,7 +79,15 @@ async fn hello() {
             sleep(Duration::from_millis(100)).await;
             let body = postcard::to_stdvec(&Example { a: 56, b: 1234 }).unwrap();
             STACK
-                .send_raw(src, dst, Some(ExampleEndpoint::REQ_KEY), &body, None)
+                .send_raw(
+                    Header {
+                        src,
+                        dst,
+                        key: Some(ExampleEndpoint::REQ_KEY),
+                        seq_no: None,
+                    },
+                    &body,
+                )
                 .unwrap();
         });
 
@@ -124,20 +136,24 @@ async fn hello() {
     // Both sends should fail.
     STACK
         .send_ty::<Other>(
-            src,
-            dst,
-            OtherEndpoint::REQ_KEY,
+            Header {
+                src,
+                dst,
+                key: Some(OtherEndpoint::REQ_KEY),
+                seq_no: None,
+            },
             Other { a: 345, b: -123 },
-            None,
         )
         .unwrap_err();
     STACK
         .send_ty::<Example>(
-            src,
-            dst,
-            ExampleEndpoint::REQ_KEY,
+            Header {
+                src,
+                dst,
+                key: Some(ExampleEndpoint::REQ_KEY),
+                seq_no: None,
+            },
             Example { a: 42, b: 789 },
-            None,
         )
         .unwrap_err();
 }

@@ -22,11 +22,11 @@ use core::{any::TypeId, mem::ManuallyDrop, pin::pin, ptr::NonNull};
 
 use cordyceps::List;
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use postcard_rpc::{Endpoint, Key};
+use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    Address,
+    Address, Header,
     interface_manager::{self, InterfaceManager, InterfaceSendError},
     socket::{SocketHeader, SocketSendError, owned::OwnedSocket},
 };
@@ -151,7 +151,7 @@ where
     /// // Define an example endpoint
     /// postcard_rpc::endpoint!(Example, u32, i32, "pathho");
     ///
-    /// static STACKX: NetStack<CSRMutex, NullIM> = NetStack::new();
+    /// static STACK: NetStack<CSRMutex, NullIM> = NetStack::new();
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -160,14 +160,14 @@ where
     ///     #     println!("Serve!");
     ///     #     let srv = ergot::socket::endpoint::OwnedEndpointSocket::<Example>::new();
     ///     #     let srv = core::pin::pin!(srv);
-    ///     #     let mut hdl = srv.attach(&STACKX);
+    ///     #     let mut hdl = srv.attach(&STACK);
     ///     #     hdl.serve(async |p| p as i32).await.unwrap();
     ///     #     println!("Served!");
     ///     # });
     ///     # // TODO: let the server attach first
     ///     # tokio::time::sleep(core::time::Duration::from_millis(10)).await;
     ///     // Make a ping request to local
-    ///     let res = STACKX.req_resp::<Example>(
+    ///     let res = STACK.req_resp::<Example>(
     ///         Address::unknown(),
     ///         42u32,
     ///     ).await;
@@ -188,17 +188,17 @@ where
         let resp_sock = OwnedSocket::new_endpoint_resp::<E>();
         let resp_sock = pin!(resp_sock);
         let mut resp_hdl = resp_sock.attach(self);
-        self.send_ty(
-            Address {
+        let hdr = Header {
+            src: Address {
                 network_id: 0,
                 node_id: 0,
                 port_id: resp_hdl.port(),
             },
             dst,
-            E::REQ_KEY,
-            req,
-            None,
-        )?;
+            key: Some(E::REQ_KEY),
+            seq_no: None,
+        };
+        self.send_ty(hdr, req)?;
         // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
         // port ids now?
         let resp = resp_hdl.recv().await;
@@ -210,14 +210,13 @@ where
     /// This interface should almost never be used by end-users, and is instead
     /// typically used by interfaces to feed received messages into the
     /// [`NetStack`].
-    pub fn send_raw(
-        &'static self,
-        src: Address,
-        dst: Address,
-        key: Option<Key>,
-        body: &[u8],
-        seq_no: Option<u16>,
-    ) -> Result<(), NetStackSendError> {
+    pub fn send_raw(&'static self, hdr: Header, body: &[u8]) -> Result<(), NetStackSendError> {
+        let Header {
+            src,
+            dst,
+            key,
+            seq_no,
+        } = &hdr;
         if dst.port_id == 0 && key.is_none() {
             return Err(NetStackSendError::AnyPortMissingKey);
         }
@@ -225,7 +224,7 @@ where
 
         self.inner.with_lock(|inner| {
             let res = if !local_bypass {
-                inner.manager.send_raw(src, dst, key, body)
+                inner.manager.send_raw(hdr.clone(), body)
             } else {
                 Err(InterfaceSendError::DestinationLocal)
             };
@@ -250,14 +249,14 @@ where
                                 let this: NonNull<SocketHeader> = socket;
                                 let this: NonNull<()> = this.cast();
                                 let seq_no = if let Some(seq) = seq_no {
-                                    seq
+                                    *seq
                                 } else {
                                     let seq = inner.seq_no;
                                     inner.seq_no = inner.seq_no.wrapping_add(1);
                                     seq
                                 };
 
-                                (f)(this, body, src, dst, seq_no)
+                                (f)(this, body, *src, *dst, seq_no)
                                     .map_err(NetStackSendError::SocketSend)
                             };
                             return res;
@@ -280,19 +279,22 @@ where
     /// [`Topic::TOPIC_KEY`]: postcard_rpc::Topic::TOPIC_KEY
     pub fn send_ty<T: 'static + Serialize>(
         &'static self,
-        src: Address,
-        dst: Address,
-        key: Key,
+        hdr: Header,
         t: T,
-        seq_no: Option<u16>,
     ) -> Result<(), NetStackSendError> {
+        let Header {
+            src,
+            dst,
+            key,
+            seq_no,
+        } = &hdr;
         // Can we assume the destination is local?
         let local_bypass = src.net_node_any() && dst.net_node_any();
 
         self.inner.with_lock(|inner| {
             let res = if !local_bypass {
                 // Not local: offer to the interface manager to send
-                inner.manager.send(src, dst, Some(key), &t)
+                inner.manager.send(hdr.clone(), &t)
             } else {
                 // just skip to local sending
                 Err(InterfaceSendError::DestinationLocal)
@@ -319,20 +321,20 @@ where
                         };
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
-                        if (port == dst.port_id || dst.port_id == 0) && key == skt_key {
+                        if (port == dst.port_id || dst.port_id == 0) && key.unwrap() == skt_key {
                             let res = if let Some(f) = vtable.send_owned {
                                 let this: NonNull<SocketHeader> = socket;
                                 let this: NonNull<()> = this.cast();
                                 let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
                                 let that: NonNull<()> = that.cast();
                                 let seq_no = if let Some(seq) = seq_no {
-                                    seq
+                                    *seq
                                 } else {
                                     let seq = inner.seq_no;
                                     inner.seq_no = inner.seq_no.wrapping_add(1);
                                     seq
                                 };
-                                (f)(this, that, &TypeId::of::<T>(), src, dst, seq_no)
+                                (f)(this, that, &TypeId::of::<T>(), *src, *dst, seq_no)
                                     .map_err(NetStackSendError::SocketSend)
                             } else if let Some(_f) = vtable.send_bor {
                                 // TODO: if we support send borrowed, then we need to

@@ -19,11 +19,11 @@
 use std::sync::Arc;
 use std::{cell::UnsafeCell, mem::MaybeUninit};
 
+use crate::Header;
 use crate::{NetStack, interface_manager::std_utils::ser_frame};
 
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
-use postcard_rpc::Key;
 use tokio::sync::mpsc::Sender;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -152,13 +152,13 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let res = self.stack.send_raw(
-                                frame.src,
-                                frame.dst,
-                                frame.key,
-                                &frame.body,
-                                Some(frame.seq),
-                            );
+                            let hdr = Header {
+                                src: frame.src,
+                                dst: frame.dst,
+                                key: frame.key,
+                                seq_no: Some(frame.seq),
+                            };
+                            let res = self.stack.send_raw(hdr, &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {
@@ -208,46 +208,44 @@ impl StdTcpIm {
 impl InterfaceManager for StdTcpIm {
     fn send<T: serde::Serialize>(
         &mut self,
-        mut src: crate::Address,
-        dst: crate::Address,
-        key: Option<Key>,
+        mut hdr: Header,
         data: &T,
     ) -> Result<(), InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
-        assert!(!(dst.port_id == 0 && key.is_none()));
+        assert!(!(hdr.dst.port_id == 0 && hdr.key.is_none()));
 
         let inner = self.get_or_init_inner();
         // todo: we only handle direct dests, we will probably also want to search
         // some kind of net_id:interface routing table
         let Ok(idx) = inner
             .interfaces
-            .binary_search_by_key(&dst.network_id, |int| int.net_id)
+            .binary_search_by_key(&hdr.dst.network_id, |int| int.net_id)
         else {
             return Err(InterfaceSendError::NoRouteToDest);
         };
 
         let interface = &inner.interfaces[idx];
         // TODO: Assumption: "we" are always node_id==1
-        if dst.network_id == interface.net_id && dst.node_id == 1 {
+        if hdr.dst.network_id == interface.net_id && hdr.dst.node_id == 1 {
             return Err(InterfaceSendError::DestinationLocal);
         }
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
-        if src.net_node_any() {
+        if hdr.src.net_node_any() {
             // todo: if we know the destination is EXACTLY this network,
             // we could leave the network_id local to allow for shorter
             // addresses
-            src.network_id = interface.net_id;
-            src.node_id = 1;
+            hdr.src.network_id = interface.net_id;
+            hdr.src.node_id = 1;
         }
 
         let seq_no = inner.seq_no;
         inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            src,
-            dst,
+            src: hdr.src,
+            dst: hdr.dst,
             seq: seq_no,
-            key,
+            key: hdr.key,
             body: postcard::to_stdvec(data).unwrap(),
         });
         match res {
@@ -261,15 +259,9 @@ impl InterfaceManager for StdTcpIm {
         }
     }
 
-    fn send_raw(
-        &mut self,
-        mut src: crate::Address,
-        dst: crate::Address,
-        key: Option<Key>,
-        data: &[u8],
-    ) -> Result<(), InterfaceSendError> {
+    fn send_raw(&mut self, mut hdr: Header, data: &[u8]) -> Result<(), InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
-        assert!(!(dst.port_id == 0 && key.is_none()));
+        assert!(!(hdr.dst.port_id == 0 && hdr.key.is_none()));
 
         let inner = self.get_or_init_inner();
         // todo: dedupe w/ send
@@ -277,33 +269,33 @@ impl InterfaceManager for StdTcpIm {
         // todo: we only handle direct dests
         let Ok(idx) = inner
             .interfaces
-            .binary_search_by_key(&dst.network_id, |int| int.net_id)
+            .binary_search_by_key(&hdr.dst.network_id, |int| int.net_id)
         else {
             return Err(InterfaceSendError::NoRouteToDest);
         };
 
         let interface = &inner.interfaces[idx];
         // TODO: Assumption: "we" are always node_id==1
-        if dst.network_id == interface.net_id && dst.node_id == 1 {
+        if hdr.dst.network_id == interface.net_id && hdr.dst.node_id == 1 {
             return Err(InterfaceSendError::DestinationLocal);
         }
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
-        if src.net_node_any() {
+        if hdr.src.net_node_any() {
             // todo: if we know the destination is EXACTLY this network,
             // we could leave the network_id local to allow for shorter
             // addresses
-            src.network_id = interface.net_id;
-            src.node_id = 1;
+            hdr.src.network_id = interface.net_id;
+            hdr.src.node_id = 1;
         }
 
         let seq_no = inner.seq_no;
         inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            src,
-            dst,
+            src: hdr.src,
+            dst: hdr.dst,
             seq: seq_no,
-            key,
+            key: hdr.key,
             body: data.to_vec(),
         });
         match res {

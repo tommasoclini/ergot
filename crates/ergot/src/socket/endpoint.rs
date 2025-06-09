@@ -5,7 +5,7 @@ use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{NetStack, NetStackSendError, interface_manager::InterfaceManager};
+use crate::{Header, NetStack, NetStackSendError, interface_manager::InterfaceManager};
 
 use super::{
     OwnedMessage,
@@ -85,9 +85,13 @@ where
         let msg = self.hdl.recv().await;
         let OwnedMessage { src, dst, t, seq } = msg;
         let resp = f(t).await;
-        self.hdl
-            .net
-            .send_ty::<E::Response>(dst, src, E::RESP_KEY, resp, Some(seq))
+        let hdr = Header {
+            src,
+            dst,
+            key: Some(E::RESP_KEY),
+            seq_no: Some(seq),
+        };
+        self.hdl.net.send_ty::<E::Response>(hdr, resp)
     }
 }
 
@@ -156,8 +160,12 @@ where
         let msg = self.hdl.recv().await;
         let OwnedMessage { src, dst, t, seq } = msg;
         let resp = f(t).await;
-        self.hdl
-            .net
-            .send_ty::<E::Response>(dst, src, E::RESP_KEY, resp, Some(seq))
+        let hdr = Header {
+            src,
+            dst,
+            key: Some(E::RESP_KEY),
+            seq_no: Some(seq),
+        };
+        self.hdl.net.send_ty::<E::Response>(hdr, resp)
     }
 }
