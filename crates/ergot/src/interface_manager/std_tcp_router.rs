@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::{cell::UnsafeCell, mem::MaybeUninit};
 
-use crate::Header;
+use crate::{Header, HeaderSeq};
 use crate::{NetStack, interface_manager::std_utils::ser_frame};
 
 use maitake_sync::WaitQueue;
@@ -141,11 +141,17 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             // If the message comes in and has a src net_id of zero,
                             // we should rewrite it so it isn't later understood as a
                             // local packet.
-                            if frame.src.network_id == 0 {
-                                assert_ne!(frame.src.node_id, 0, "we got a local packet remotely?");
-                                assert_ne!(frame.src.node_id, 1, "someone is pretending to be us?");
+                            if frame.hdr.src.network_id == 0 {
+                                assert_ne!(
+                                    frame.hdr.src.node_id, 0,
+                                    "we got a local packet remotely?"
+                                );
+                                assert_ne!(
+                                    frame.hdr.src.node_id, 1,
+                                    "someone is pretending to be us?"
+                                );
 
-                                frame.src.network_id = self.net_id;
+                                frame.hdr.src.network_id = self.net_id;
                             }
                             // TODO: if the destination IS self.net_id, we could rewrite the
                             // dest net_id as zero to avoid a pass through the interface manager.
@@ -153,10 +159,11 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
                             let hdr = Header {
-                                src: frame.src,
-                                dst: frame.dst,
-                                key: frame.key,
-                                seq_no: Some(frame.seq),
+                                src: frame.hdr.src,
+                                dst: frame.hdr.dst,
+                                key: frame.hdr.key,
+                                seq_no: Some(frame.hdr.seq_no),
+                                kind: frame.hdr.kind,
                             };
                             let res = self.stack.send_raw(hdr, &frame.body);
                             match res {
@@ -242,10 +249,13 @@ impl InterfaceManager for StdTcpIm {
         let seq_no = inner.seq_no;
         inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq: seq_no,
-            key: hdr.key,
+            hdr: HeaderSeq {
+                src: hdr.src,
+                dst: hdr.dst,
+                seq_no,
+                key: hdr.key,
+                kind: hdr.kind,
+            },
             body: postcard::to_stdvec(data).unwrap(),
         });
         match res {
@@ -292,10 +302,13 @@ impl InterfaceManager for StdTcpIm {
         let seq_no = inner.seq_no;
         inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq: seq_no,
-            key: hdr.key,
+            hdr: HeaderSeq {
+                src: hdr.src,
+                dst: hdr.dst,
+                seq_no,
+                key: hdr.key,
+                kind: hdr.kind,
+            },
             body: data.to_vec(),
         });
         match res {

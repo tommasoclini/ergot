@@ -1,7 +1,7 @@
 use std::{pin::pin, time::Duration};
 
 use ergot::{
-    Address, Header, NetStack, interface_manager::null::NullInterfaceManager,
+    Address, FrameKind, Header, NetStack, interface_manager::null::NullInterfaceManager,
     socket::endpoint::OwnedEndpointSocket,
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -57,6 +57,7 @@ async fn hello() {
                         dst,
                         key: Some(OtherEndpoint::REQ_KEY),
                         seq_no: None,
+                        kind: FrameKind::EndpointRequest,
                     },
                     Other { a: 345, b: -123 },
                 )
@@ -69,6 +70,7 @@ async fn hello() {
                         dst,
                         key: Some(ExampleEndpoint::REQ_KEY),
                         seq_no: None,
+                        kind: FrameKind::EndpointRequest,
                     },
                     Example { a: 42, b: 789 },
                 )
@@ -85,6 +87,7 @@ async fn hello() {
                         dst,
                         key: Some(ExampleEndpoint::REQ_KEY),
                         seq_no: None,
+                        kind: FrameKind::EndpointRequest,
                     },
                     &body,
                 )
@@ -141,6 +144,7 @@ async fn hello() {
                 dst,
                 key: Some(OtherEndpoint::REQ_KEY),
                 seq_no: None,
+                kind: FrameKind::EndpointRequest,
             },
             Other { a: 345, b: -123 },
         )
@@ -152,6 +156,7 @@ async fn hello() {
                 dst,
                 key: Some(ExampleEndpoint::REQ_KEY),
                 seq_no: None,
+                kind: FrameKind::EndpointRequest,
             },
             Example { a: 42, b: 789 },
         )

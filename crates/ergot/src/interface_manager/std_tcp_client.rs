@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::{
-    Header, NetStack,
+    Header, HeaderSeq, NetStack,
     interface_manager::std_utils::{OwnedFrame, ser_frame},
 };
 
@@ -111,10 +111,13 @@ impl InterfaceManager for StdTcpClientIm {
         let seq_no = self.seq_no;
         self.seq_no = self.seq_no.wrapping_add(1);
         let res = intfc.interface.skt_tx.try_send(OwnedFrame {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq: seq_no,
-            key: hdr.key,
+            hdr: HeaderSeq {
+                src: hdr.src,
+                dst: hdr.dst,
+                seq_no,
+                key: hdr.key,
+                kind: hdr.kind,
+            },
             body: postcard::to_stdvec(data).unwrap(),
         });
         match res {
@@ -160,10 +163,13 @@ impl InterfaceManager for StdTcpClientIm {
         let seq_no = self.seq_no;
         self.seq_no = self.seq_no.wrapping_add(1);
         let res = intfc.interface.skt_tx.try_send(OwnedFrame {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq: seq_no,
-            key: hdr.key,
+            hdr: HeaderSeq {
+                src: hdr.src,
+                dst: hdr.dst,
+                seq_no,
+                key: hdr.key,
+                kind: hdr.kind,
+            },
             body: data.to_vec(),
         });
         match res {
@@ -226,17 +232,17 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             println!("Got Frame!");
                             let take_net = net_id.is_none()
                                 || net_id.is_some_and(|n| {
-                                    frame.dst.network_id != 0 && n != frame.dst.network_id
+                                    frame.hdr.dst.network_id != 0 && n != frame.hdr.dst.network_id
                                 });
                             if take_net {
                                 self.stack.with_interface_manager(|im| {
                                     if let Some(i) = im.inner.as_mut() {
                                         // i am, whoever you say i am
-                                        i.net_id = frame.dst.network_id;
+                                        i.net_id = frame.hdr.dst.network_id;
                                     }
                                     // else: uhhhhhh
                                 });
-                                net_id = Some(frame.dst.network_id);
+                                net_id = Some(frame.hdr.dst.network_id);
                             }
 
                             // If the message comes in and has a src net_id of zero,
@@ -245,17 +251,17 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // TODO: accept any packet if we don't have a net_id yet?
                             if let Some(net) = net_id.as_ref() {
-                                if frame.src.network_id == 0 {
+                                if frame.hdr.src.network_id == 0 {
                                     assert_ne!(
-                                        frame.src.node_id, 0,
+                                        frame.hdr.src.node_id, 0,
                                         "we got a local packet remotely?"
                                     );
                                     assert_ne!(
-                                        frame.src.node_id, 2,
+                                        frame.hdr.src.node_id, 2,
                                         "someone is pretending to be us?"
                                     );
 
-                                    frame.src.network_id = *net;
+                                    frame.hdr.src.network_id = *net;
                                 }
                             }
 
@@ -265,10 +271,11 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
                             let hdr = Header {
-                                src: frame.src,
-                                dst: frame.dst,
-                                key: frame.key,
-                                seq_no: Some(frame.seq),
+                                src: frame.hdr.src,
+                                dst: frame.hdr.dst,
+                                key: frame.hdr.key,
+                                seq_no: Some(frame.hdr.seq_no),
+                                kind: frame.hdr.kind,
                             };
                             let res = self.stack.send_raw(hdr, &frame.body);
                             match res {

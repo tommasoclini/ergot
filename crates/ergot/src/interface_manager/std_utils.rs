@@ -1,12 +1,9 @@
 use postcard_rpc::Key;
 
-use crate::Address;
+use crate::{Address, FrameKind, HeaderSeq};
 
 pub(crate) struct OwnedFrame {
-    pub(crate) src: Address,
-    pub(crate) dst: Address,
-    pub(crate) seq: u16,
-    pub(crate) key: Option<Key>,
+    pub(crate) hdr: HeaderSeq,
     pub(crate) body: Vec<u8>,
 }
 
@@ -16,18 +13,19 @@ pub enum ReceiverError {
 }
 
 pub(crate) fn ser_frame(frame: OwnedFrame) -> Vec<u8> {
-    let dst_any = frame.dst.port_id == 0;
-    let src = frame.src.as_u32();
-    let dst = frame.dst.as_u32();
-    let seq = frame.seq;
+    let dst_any = frame.hdr.dst.port_id == 0;
+    let src = frame.hdr.src.as_u32();
+    let dst = frame.hdr.dst.as_u32();
+    let seq = frame.hdr.seq_no;
 
     let mut out = vec![];
     // TODO: This is bad and does a ton of allocs. yolo
     //
     out.extend_from_slice(&postcard::to_stdvec(&src).unwrap());
     out.extend_from_slice(&postcard::to_stdvec(&dst).unwrap());
+    out.push(frame.hdr.kind.to_wire());
     if dst_any {
-        let key = frame.key.unwrap();
+        let key = frame.hdr.key.unwrap();
         out.extend_from_slice(&postcard::to_stdvec(&key).unwrap());
     }
 
@@ -43,6 +41,8 @@ pub(crate) fn de_frame(remain: &[u8]) -> Option<OwnedFrame> {
     let src = Address::from_word(src_word);
     let (dst_word, remain) = postcard::take_from_bytes::<u32>(remain).ok()?;
     let dst = Address::from_word(dst_word);
+    let (kind, remain) = remain.split_first()?;
+    let kind = FrameKind::from_wire(*kind)?;
     let (key, remain) = if dst.port_id == 0 {
         let (k, r) = postcard::take_from_bytes::<Key>(remain).ok()?;
         (Some(k), r)
@@ -54,10 +54,13 @@ pub(crate) fn de_frame(remain: &[u8]) -> Option<OwnedFrame> {
     let body = remain.to_vec();
 
     Some(OwnedFrame {
-        src,
-        dst,
-        seq,
-        key,
+        hdr: HeaderSeq {
+            src,
+            dst,
+            seq_no: seq,
+            key,
+            kind,
+        },
         body,
     })
 }

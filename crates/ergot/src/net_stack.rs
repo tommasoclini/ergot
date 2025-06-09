@@ -26,7 +26,7 @@ use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    Address, Header,
+    Address, FrameKind, Header,
     interface_manager::{self, InterfaceManager, InterfaceSendError},
     socket::{SocketHeader, SocketSendError, owned::OwnedSocket},
 };
@@ -51,6 +51,7 @@ pub enum NetStackSendError {
     InterfaceSend(InterfaceSendError),
     NoRoute,
     AnyPortMissingKey,
+    WrongPortKind,
 }
 
 // ---- impl NetStack ----
@@ -197,6 +198,7 @@ where
             dst,
             key: Some(E::REQ_KEY),
             seq_no: None,
+            kind: FrameKind::EndpointRequest,
         };
         self.send_ty(hdr, req)?;
         // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
@@ -216,6 +218,7 @@ where
             dst,
             key,
             seq_no,
+            kind,
         } = &hdr;
         if dst.port_id == 0 && key.is_none() {
             return Err(NetStackSendError::AnyPortMissingKey);
@@ -233,12 +236,20 @@ where
                 Ok(()) => Ok(()),
                 Err(InterfaceSendError::DestinationLocal) => {
                     for socket in inner.sockets.iter_raw() {
-                        let (port, vtable, skt_key) = unsafe {
+                        let (port, vtable, skt_key, skt_ty) = unsafe {
                             let skt_ref = socket.as_ref();
                             let port = skt_ref.port;
                             let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.kind.key())
+                            (port, vtable, skt_ref.kind.key(), skt_ref.kind)
                         };
+                        if !kind.matches(&skt_ty) {
+                            if dst.port_id != 0 && dst.port_id == port {
+                                // If kind mismatch and not wildcard: report error
+                                return Err(NetStackSendError::WrongPortKind);
+                            } else {
+                                continue;
+                            }
+                        }
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
                         if (port == dst.port_id)
@@ -287,6 +298,7 @@ where
             dst,
             key,
             seq_no,
+            kind,
         } = &hdr;
         // Can we assume the destination is local?
         let local_bypass = src.net_node_any() && dst.net_node_any();
@@ -313,12 +325,21 @@ where
 
                     // Check each socket to see if we want to send it there...
                     for socket in inner.sockets.iter_raw() {
-                        let (port, vtable, skt_key) = unsafe {
+                        let (port, vtable, skt_key, skt_ty) = unsafe {
                             let skt_ref = socket.as_ref();
                             let port = skt_ref.port;
                             let vtable = skt_ref.vtable.clone();
-                            (port, vtable, skt_ref.kind.key())
+                            (port, vtable, skt_ref.kind.key(), skt_ref.kind)
                         };
+                        if !kind.matches(&skt_ty) {
+                            if dst.port_id != 0 && dst.port_id == port {
+                                // If kind mismatch and not wildcard: report error
+                                return Err(NetStackSendError::WrongPortKind);
+                            } else {
+                                continue;
+                            }
+                        }
+
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
                         if (port == dst.port_id || dst.port_id == 0) && key.unwrap() == skt_key {

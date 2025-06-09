@@ -28,7 +28,7 @@ pub struct TopicData {
     pub msg_schema: &'static NamedType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum SocketTy {
     EndpointReq(&'static EndpointData),
     EndpointResp(&'static EndpointData),

@@ -249,6 +249,44 @@ pub mod well_known;
 pub use address::Address;
 pub use net_stack::{NetStack, NetStackSendError};
 use postcard_rpc::Key;
+use socket::SocketTy;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum FrameKind {
+    EndpointRequest,
+    EndpointResponse,
+    Topic,
+}
+
+impl FrameKind {
+    pub fn from_wire(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::EndpointRequest),
+            1 => Some(Self::EndpointResponse),
+            2 => Some(Self::Topic),
+            _ => None,
+        }
+    }
+
+    pub fn to_wire(self) -> u8 {
+        match self {
+            FrameKind::EndpointRequest => 0,
+            FrameKind::EndpointResponse => 1,
+            FrameKind::Topic => 2,
+        }
+    }
+
+    pub fn matches(&self, other: &SocketTy) -> bool {
+        #[allow(clippy::match_like_matches_macro)]
+        match (self, other) {
+            (FrameKind::EndpointRequest, SocketTy::EndpointReq(_)) => true,
+            (FrameKind::EndpointResponse, SocketTy::EndpointResp(_)) => true,
+            (FrameKind::Topic, SocketTy::TopicIn(_)) => true,
+            _ => false,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Header {
@@ -256,4 +294,14 @@ pub struct Header {
     pub dst: Address,
     pub key: Option<Key>,
     pub seq_no: Option<u16>,
+    pub kind: FrameKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeaderSeq {
+    pub src: Address,
+    pub dst: Address,
+    pub key: Option<Key>,
+    pub seq_no: u16,
+    pub kind: FrameKind,
 }
