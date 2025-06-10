@@ -213,17 +213,10 @@ where
     /// typically used by interfaces to feed received messages into the
     /// [`NetStack`].
     pub fn send_raw(&'static self, hdr: Header, body: &[u8]) -> Result<(), NetStackSendError> {
-        let Header {
-            src,
-            dst,
-            key,
-            seq_no,
-            kind,
-        } = &hdr;
-        if dst.port_id == 0 && key.is_none() {
+        if hdr.dst.port_id == 0 && hdr.key.is_none() {
             return Err(NetStackSendError::AnyPortMissingKey);
         }
-        let local_bypass = src.net_node_any() && dst.net_node_any();
+        let local_bypass = hdr.src.net_node_any() && hdr.dst.net_node_any();
 
         self.inner.with_lock(|inner| {
             let res = if !local_bypass {
@@ -242,8 +235,8 @@ where
                             let vtable = skt_ref.vtable.clone();
                             (port, vtable, skt_ref.kind.key(), skt_ref.kind)
                         };
-                        if !kind.matches(&skt_ty) {
-                            if dst.port_id != 0 && dst.port_id == port {
+                        if !hdr.kind.matches(&skt_ty) {
+                            if hdr.dst.port_id != 0 && hdr.dst.port_id == port {
                                 // If kind mismatch and not wildcard: report error
                                 return Err(NetStackSendError::WrongPortKind);
                             } else {
@@ -252,23 +245,20 @@ where
                         }
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
-                        if (port == dst.port_id)
-                            || (dst.port_id == 0 && key.is_some_and(|k| k == skt_key))
+                        if (port == hdr.dst.port_id)
+                            || (hdr.dst.port_id == 0 && hdr.key.is_some_and(|k| k == skt_key))
                         {
                             let res = {
                                 let f = vtable.send_raw;
                                 let this: NonNull<SocketHeader> = socket;
                                 let this: NonNull<()> = this.cast();
-                                let seq_no = if let Some(seq) = seq_no {
-                                    *seq
-                                } else {
+                                let hdr = hdr.to_headerseq_or_with_seq(|| {
                                     let seq = inner.seq_no;
                                     inner.seq_no = inner.seq_no.wrapping_add(1);
                                     seq
-                                };
+                                });
 
-                                (f)(this, body, *src, *dst, seq_no)
-                                    .map_err(NetStackSendError::SocketSend)
+                                (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
                             };
                             return res;
                         }
@@ -293,15 +283,8 @@ where
         hdr: Header,
         t: T,
     ) -> Result<(), NetStackSendError> {
-        let Header {
-            src,
-            dst,
-            key,
-            seq_no,
-            kind,
-        } = &hdr;
         // Can we assume the destination is local?
-        let local_bypass = src.net_node_any() && dst.net_node_any();
+        let local_bypass = hdr.src.net_node_any() && hdr.dst.net_node_any();
 
         self.inner.with_lock(|inner| {
             let res = if !local_bypass {
@@ -331,8 +314,8 @@ where
                             let vtable = skt_ref.vtable.clone();
                             (port, vtable, skt_ref.kind.key(), skt_ref.kind)
                         };
-                        if !kind.matches(&skt_ty) {
-                            if dst.port_id != 0 && dst.port_id == port {
+                        if !hdr.kind.matches(&skt_ty) {
+                            if hdr.dst.port_id != 0 && hdr.dst.port_id == port {
                                 // If kind mismatch and not wildcard: report error
                                 return Err(NetStackSendError::WrongPortKind);
                             } else {
@@ -342,20 +325,20 @@ where
 
                         // TODO: only allow port_id == 0 if there is only one matching port
                         // with this key.
-                        if (port == dst.port_id || dst.port_id == 0) && key.unwrap() == skt_key {
+                        if (port == hdr.dst.port_id || hdr.dst.port_id == 0)
+                            && hdr.key.unwrap() == skt_key
+                        {
                             let res = if let Some(f) = vtable.send_owned {
                                 let this: NonNull<SocketHeader> = socket;
                                 let this: NonNull<()> = this.cast();
                                 let that: NonNull<ManuallyDrop<T>> = NonNull::from(&mut t);
                                 let that: NonNull<()> = that.cast();
-                                let seq_no = if let Some(seq) = seq_no {
-                                    *seq
-                                } else {
+                                let hdr = hdr.to_headerseq_or_with_seq(|| {
                                     let seq = inner.seq_no;
                                     inner.seq_no = inner.seq_no.wrapping_add(1);
                                     seq
-                                };
-                                (f)(this, that, &TypeId::of::<T>(), *src, *dst, seq_no)
+                                });
+                                (f)(this, that, hdr, &TypeId::of::<T>())
                                     .map_err(NetStackSendError::SocketSend)
                             } else if let Some(_f) = vtable.send_bor {
                                 // TODO: if we support send borrowed, then we need to

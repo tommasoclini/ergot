@@ -270,14 +270,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let hdr = Header {
-                                src: frame.hdr.src,
-                                dst: frame.hdr.dst,
-                                key: frame.hdr.key,
-                                seq_no: Some(frame.hdr.seq_no),
-                                kind: frame.hdr.kind,
-                            };
-                            let res = self.stack.send_raw(hdr, &frame.body);
+                            let res = self.stack.send_raw(frame.hdr.into(), &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {

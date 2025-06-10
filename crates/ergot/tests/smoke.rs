@@ -101,7 +101,7 @@ async fn hello() {
                 node_id: 0,
                 port_id: 123
             },
-            msg.src
+            msg.hdr.src
         );
         assert_eq!(
             Address {
@@ -109,7 +109,7 @@ async fn hello() {
                 node_id: 0,
                 port_id: 0
             },
-            msg.dst
+            msg.hdr.dst
         );
         assert_eq!(Example { a: 42, b: 789 }, msg.t);
 
@@ -121,7 +121,7 @@ async fn hello() {
                 node_id: 0,
                 port_id: 123
             },
-            msg.src
+            msg.hdr.src
         );
         assert_eq!(
             Address {
@@ -129,7 +129,7 @@ async fn hello() {
                 node_id: 0,
                 port_id: 0
             },
-            msg.dst
+            msg.hdr.dst
         );
         assert_eq!(Example { a: 56, b: 1234 }, msg.t);
         tsk.await.unwrap();
@@ -174,7 +174,7 @@ async fn req_resp() {
 
     let reqqr = tokio::task::spawn(async {
         for i in 0..3 {
-            sleep(Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(100)).await;
 
             // Make the request, look ma only the stack handle
             let resp = STACK

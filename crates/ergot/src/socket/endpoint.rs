@@ -5,7 +5,7 @@ use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{FrameKind, Header, NetStack, NetStackSendError, interface_manager::InterfaceManager};
+use crate::{interface_manager::InterfaceManager, FrameKind, Header, NetStack, NetStackSendError};
 
 use super::{
     OwnedMessage,
@@ -83,13 +83,15 @@ where
         E::Response: Serialize + DeserializeOwned + 'static,
     {
         let msg = self.hdl.recv().await;
-        let OwnedMessage { src, dst, t, seq } = msg;
+        let OwnedMessage { hdr, t } = msg;
         let resp = f(t).await;
-        let hdr = Header {
-            src: dst,
-            dst: src,
+
+        // NOTE: We swap src/dst, AND we go from req -> resp (both in kind and key)
+        let hdr: Header = Header {
+            src: hdr.dst,
+            dst: hdr.src,
             key: Some(E::RESP_KEY),
-            seq_no: Some(seq),
+            seq_no: Some(hdr.seq_no),
             kind: FrameKind::EndpointResponse,
         };
         self.hdl.net.send_ty::<E::Response>(hdr, resp)
@@ -159,15 +161,17 @@ where
         E::Response: Serialize + DeserializeOwned + 'static,
     {
         let msg = self.hdl.recv().await;
-        let OwnedMessage { src, dst, t, seq } = msg;
+        let OwnedMessage { hdr, t } = msg;
         let resp = f(t).await;
-        let hdr = Header {
-            src: dst,
-            dst: src,
+        // NOTE: We swap src/dst, AND we go from req -> resp (both in kind and key)
+        let hdr: Header = Header {
+            src: hdr.dst,
+            dst: hdr.src,
             key: Some(E::RESP_KEY),
-            seq_no: Some(seq),
+            seq_no: Some(hdr.seq_no),
             kind: FrameKind::EndpointResponse,
         };
+
         self.hdl.net.send_ty::<E::Response>(hdr, resp)
     }
 }

@@ -6,7 +6,7 @@ use postcard_rpc::{Endpoint, Key, Topic};
 use postcard_schema::Schema;
 use postcard_schema::schema::NamedType;
 
-use crate::Address;
+use crate::HeaderSeq;
 
 pub mod endpoint;
 pub mod owned;
@@ -63,13 +63,13 @@ pub struct SocketVTable {
     // them. They are naturally destroyed by their true owner.
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct OwnedMessage<T: 'static> {
-    pub src: Address,
-    pub dst: Address,
-    pub seq: u16,
+    pub hdr: HeaderSeq,
     pub t: T,
 }
+
+// TODO: replace with header and handle kind and stuff right!
 
 // Morally: &mut ManuallyDrop<T>, TypeOf<T>, src, dst
 // If return OK: the type has been moved OUT of the source
@@ -79,14 +79,10 @@ pub type SendOwned = fn(
     NonNull<()>,
     // The T ptr
     NonNull<()>,
+    // the header
+    HeaderSeq,
     // The T ty
     &TypeId,
-    // The src
-    Address,
-    // the dst
-    Address,
-    // the seq_no
-    u16,
 ) -> Result<(), SocketSendError>;
 // Morally: &T, src, dst
 // Always a serialize
@@ -95,12 +91,8 @@ pub type SendBorrowed = fn(
     NonNull<()>,
     // The T ptr
     NonNull<()>,
-    // the src
-    Address,
-    // The dst
-    Address,
-    // the seq_no
-    u16,
+    // the header
+    HeaderSeq,
 ) -> Result<(), SocketSendError>;
 // Morally: it's a packet
 // Never a serialize, sometimes a deserialize
@@ -109,12 +101,8 @@ pub type SendRaw = fn(
     NonNull<()>,
     // The packet
     &[u8],
-    // The src
-    Address,
-    // The dst
-    Address,
-    // the seq_no
-    u16,
+    // the header
+    HeaderSeq,
 ) -> Result<(), SocketSendError>;
 
 impl EndpointData {

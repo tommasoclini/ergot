@@ -19,8 +19,7 @@
 use std::sync::Arc;
 use std::{cell::UnsafeCell, mem::MaybeUninit};
 
-use crate::{Header, HeaderSeq};
-use crate::{NetStack, interface_manager::std_utils::ser_frame};
+use crate::{Header, NetStack, interface_manager::std_utils::ser_frame};
 
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
@@ -35,11 +34,10 @@ use tokio::{
     sync::mpsc::{Receiver, channel, error::TrySendError},
 };
 
-use super::std_utils::ReceiverError;
 use super::{
     ConstInit, InterfaceManager, InterfaceSendError,
     std_utils::{
-        OwnedFrame,
+        OwnedFrame, ReceiverError,
         acc::{CobsAccumulator, FeedResult},
         de_frame,
     },
@@ -158,14 +156,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let hdr = Header {
-                                src: frame.hdr.src,
-                                dst: frame.hdr.dst,
-                                key: frame.hdr.key,
-                                seq_no: Some(frame.hdr.seq_no),
-                                kind: frame.hdr.kind,
-                            };
-                            let res = self.stack.send_raw(hdr, &frame.body);
+                            let res = self.stack.send_raw(frame.hdr.into(), &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {
@@ -246,16 +237,12 @@ impl InterfaceManager for StdTcpIm {
             hdr.src.node_id = 1;
         }
 
-        let seq_no = inner.seq_no;
-        inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            hdr: HeaderSeq {
-                src: hdr.src,
-                dst: hdr.dst,
-                seq_no,
-                key: hdr.key,
-                kind: hdr.kind,
-            },
+            hdr: hdr.to_headerseq_or_with_seq(|| {
+                let seq_no = inner.seq_no;
+                inner.seq_no = inner.seq_no.wrapping_add(1);
+                seq_no
+            }),
             body: postcard::to_stdvec(data).unwrap(),
         });
         match res {
@@ -299,16 +286,12 @@ impl InterfaceManager for StdTcpIm {
             hdr.src.node_id = 1;
         }
 
-        let seq_no = inner.seq_no;
-        inner.seq_no = inner.seq_no.wrapping_add(1);
         let res = interface.skt_tx.try_send(OwnedFrame {
-            hdr: HeaderSeq {
-                src: hdr.src,
-                dst: hdr.dst,
-                seq_no,
-                key: hdr.key,
-                kind: hdr.kind,
-            },
+            hdr: hdr.to_headerseq_or_with_seq(|| {
+                let seq_no = inner.seq_no;
+                inner.seq_no = inner.seq_no.wrapping_add(1);
+                seq_no
+            }),
             body: data.to_vec(),
         });
         match res {

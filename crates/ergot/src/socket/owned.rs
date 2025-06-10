@@ -12,7 +12,7 @@ use mutex::ScopedRawMutex;
 use postcard_rpc::{Endpoint, Topic};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{Address, NetStack, interface_manager::InterfaceManager};
+use crate::{HeaderSeq, NetStack, interface_manager::InterfaceManager};
 
 use super::{OwnedMessage, SocketHeader, SocketSendError, SocketTy, SocketVTable};
 
@@ -133,10 +133,8 @@ where
     fn send_owned(
         this: NonNull<()>,
         that: NonNull<()>,
+        hdr: HeaderSeq,
         ty: &TypeId,
-        src: Address,
-        dst: Address,
-        seq: u16,
     ) -> Result<(), SocketSendError> {
         if &TypeId::of::<T>() != ty {
             debug_assert!(false, "Type Mismatch!");
@@ -152,10 +150,8 @@ where
         }
 
         mutitem.t = Some(OwnedMessage {
-            src,
-            dst,
+            hdr,
             t: unsafe { that.read() },
-            seq,
         });
         if let Some(w) = mutitem.wait.take() {
             w.wake();
@@ -174,13 +170,7 @@ where
     //     Err(())
     // }
 
-    fn send_raw(
-        this: NonNull<()>,
-        that: &[u8],
-        src: Address,
-        dst: Address,
-        seq: u16,
-    ) -> Result<(), SocketSendError> {
+    fn send_raw(this: NonNull<()>, that: &[u8], hdr: HeaderSeq) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
         let mutitem: &mut OneBox<T> = unsafe { &mut *this.inner.get() };
@@ -190,7 +180,7 @@ where
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
-            mutitem.t = Some(OwnedMessage { src, dst, t, seq });
+            mutitem.t = Some(OwnedMessage { hdr, t });
             if let Some(w) = mutitem.wait.take() {
                 w.wake();
             }
