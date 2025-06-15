@@ -1,9 +1,9 @@
-use core::cell::UnsafeCell;
-use std::{
+use core::{
     any::TypeId,
+    cell::UnsafeCell,
     marker::PhantomData,
     pin::Pin,
-    ptr::NonNull,
+    ptr::{NonNull, addr_of},
     task::{Context, Poll, Waker},
 };
 
@@ -18,12 +18,15 @@ use super::{OwnedMessage, SocketHeader, SocketSendError, SocketTy, SocketVTable}
 
 // Owned Socket
 #[repr(C)]
-pub struct OwnedSocket<T>
+pub struct OwnedSocket<T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     // LOAD BEARING: must be first
     hdr: SocketHeader,
+    pub(crate) net: &'static NetStack<R, M>,
     // TODO: just a single item, we probably want a more ring-buffery
     // option for this.
     inner: UnsafeCell<OneBox<T>>,
@@ -35,9 +38,8 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub(crate) ptr: NonNull<OwnedSocket<T>>,
-    _lt: PhantomData<Pin<&'a mut OwnedSocket<T>>>,
-    pub(crate) net: &'static NetStack<R, M>,
+    pub(crate) ptr: NonNull<OwnedSocket<T, R, M>>,
+    _lt: PhantomData<Pin<&'a mut OwnedSocket<T, R, M>>>,
     port: u8,
 }
 
@@ -63,11 +65,13 @@ struct OneBox<T: 'static> {
 
 // impl OwnedSocket
 
-impl<T> OwnedSocket<T>
+impl<T, R, M> OwnedSocket<T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
-    pub const fn new_topic_in<U: Topic<Message = T>>() -> Self {
+    pub const fn new_topic_in<U: Topic<Message = T>>(net: &'static NetStack<R, M>) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -76,10 +80,11 @@ where
                 kind: const { SocketTy::topic_in::<U>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
+            net,
         }
     }
 
-    pub const fn new_endpoint_req<E: Endpoint<Request = T>>() -> Self {
+    pub const fn new_endpoint_req<E: Endpoint<Request = T>>(net: &'static NetStack<R, M>) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -88,10 +93,13 @@ where
                 kind: const { SocketTy::endpoint_req::<E>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
+            net,
         }
     }
 
-    pub const fn new_endpoint_resp<E: Endpoint<Response = T>>() -> Self {
+    pub const fn new_endpoint_resp<E: Endpoint<Response = T>>(
+        net: &'static NetStack<R, M>,
+    ) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -100,20 +108,18 @@ where
                 kind: const { SocketTy::endpoint_resp::<E>() },
             },
             inner: UnsafeCell::new(OneBox::new()),
+            net,
         }
     }
 
-    pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
-        self: Pin<&'a mut Self>,
-        stack: &'static NetStack<R, M>,
-    ) -> OwnedSocketHdl<'a, T, R, M> {
+    pub fn attach<'a>(self: Pin<&'a mut Self>) -> OwnedSocketHdl<'a, T, R, M> {
+        let stack = self.net;
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
         OwnedSocketHdl {
             ptr: ptr_self,
             _lt: PhantomData,
-            net: stack,
             port,
         }
         // TODO: once-check?
@@ -128,6 +134,10 @@ where
             send_bor: None,
             send_raw: Self::send_raw,
         }
+    }
+
+    pub fn stack(&self) -> &'static NetStack<R, M> {
+        self.net
     }
 
     fn send_owned(
@@ -204,6 +214,10 @@ where
         self.port
     }
 
+    pub fn stack(&self) -> &'static NetStack<R, M> {
+        unsafe { &*addr_of!((*self.ptr.as_ptr()).net) }
+    }
+
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
     // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
     // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
@@ -212,18 +226,17 @@ where
     }
 }
 
-impl<T, R, M> Drop for OwnedSocketHdl<'_, T, R, M>
+impl<T, R, M> Drop for OwnedSocket<T, R, M>
 where
     T: Serialize + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
     fn drop(&mut self) {
-        println!("Dropping OwnedSocketHdl!");
+        println!("Dropping OwnedSocket!");
         // first things first, remove the item from the list
         self.net.inner.with_lock(|net| {
-            let node: NonNull<OwnedSocket<T>> = self.ptr;
-            let node: NonNull<SocketHeader> = node.cast();
+            let node: NonNull<SocketHeader> = NonNull::from(&self.hdr);
             unsafe {
                 net.sockets.remove(node);
             }
@@ -260,8 +273,9 @@ where
     type Output = OwnedMessage<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let res = self.hdl.net.inner.with_lock(|_net| {
-            let this_ref: &OwnedSocket<T> = unsafe { self.hdl.ptr.as_ref() };
+        let net: &'static NetStack<R, M> = self.hdl.stack();
+        let res = net.inner.with_lock(|_net| {
+            let this_ref: &OwnedSocket<T, R, M> = unsafe { self.hdl.ptr.as_ref() };
             let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
             if let Some(t) = box_ref.t.take() {
                 Some(t)

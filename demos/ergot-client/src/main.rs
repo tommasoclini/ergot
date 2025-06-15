@@ -28,9 +28,9 @@ async fn main() -> io::Result<()> {
 }
 
 async fn pingserver() {
-    let server = StdBoundedEndpointSocket::<ErgotPingEndpoint>::new(16);
+    let server = StdBoundedEndpointSocket::<ErgotPingEndpoint, _, _>::new(&STACK, 16);
     let server = pin!(server);
-    let mut server_hdl = server.attach(&STACK);
+    let mut server_hdl = server.attach();
     loop {
         server_hdl
             .serve(async |req| {

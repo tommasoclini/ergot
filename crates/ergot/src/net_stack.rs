@@ -186,9 +186,9 @@ where
         E::Request: Serialize + DeserializeOwned + 'static,
         E::Response: Serialize + DeserializeOwned + 'static,
     {
-        let resp_sock = OwnedSocket::new_endpoint_resp::<E>();
+        let resp_sock = OwnedSocket::new_endpoint_resp::<E>(self);
         let resp_sock = pin!(resp_sock);
-        let mut resp_hdl = resp_sock.attach(self);
+        let mut resp_hdl = resp_sock.attach();
         let hdr = Header {
             src: Address {
                 network_id: 0,

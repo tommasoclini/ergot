@@ -42,9 +42,9 @@ async fn hello() {
     };
 
     {
-        let socket = OwnedEndpointSocket::<ExampleEndpoint>::new();
+        let socket = OwnedEndpointSocket::<ExampleEndpoint, _, _>::new(&STACK);
         let mut socket = pin!(socket);
-        let mut hdl = socket.as_mut().attach(&STACK);
+        let mut hdl = socket.as_mut().attach();
 
         let tsk = spawn(async move {
             sleep(Duration::from_millis(100)).await;
@@ -168,9 +168,9 @@ async fn req_resp() {
     static STACK: TestNetStack = NetStack::new();
 
     // Start the server...
-    let server = OwnedEndpointSocket::<ExampleEndpoint>::new();
+    let server = OwnedEndpointSocket::<ExampleEndpoint, _, _>::new(&STACK);
     let server = pin!(server);
-    let mut server_hdl = server.attach(&STACK);
+    let mut server_hdl = server.attach();
 
     let reqqr = tokio::task::spawn(async {
         for i in 0..3 {

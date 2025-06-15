@@ -5,7 +5,7 @@ use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{interface_manager::InterfaceManager, FrameKind, Header, NetStack, NetStackSendError};
+use crate::{FrameKind, Header, NetStack, NetStackSendError, interface_manager::InterfaceManager};
 
 use super::{
     OwnedMessage,
@@ -14,43 +14,34 @@ use super::{
 };
 
 #[pin_project]
-pub struct OwnedEndpointSocket<E>
+pub struct OwnedEndpointSocket<E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     #[pin]
-    sock: OwnedSocket<E::Request>,
+    sock: OwnedSocket<E::Request, R, M>,
 }
 
-impl<E> OwnedEndpointSocket<E>
+impl<E, R, M> OwnedEndpointSocket<E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
-    pub const fn new() -> Self {
+    pub const fn new(net: &'static NetStack<R, M>) -> Self {
         Self {
-            sock: OwnedSocket::new_endpoint_req::<E>(),
+            sock: OwnedSocket::new_endpoint_req::<E>(net),
         }
     }
 
-    pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
-        self: Pin<&'a mut Self>,
-        stack: &'static NetStack<R, M>,
-    ) -> OwnedEndpointSocketHdl<'a, E, R, M> {
+    pub fn attach<'a>(self: Pin<&'a mut Self>) -> OwnedEndpointSocketHdl<'a, E, R, M> {
         let this = self.project();
-        let hdl: OwnedSocketHdl<'_, E::Request, R, M> = this.sock.attach(stack);
+        let hdl: OwnedSocketHdl<'_, E::Request, R, M> = this.sock.attach();
         OwnedEndpointSocketHdl { hdl }
-    }
-}
-
-impl<E> Default for OwnedEndpointSocket<E>
-where
-    E: Endpoint,
-    E::Request: Serialize + DeserializeOwned + 'static,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -94,7 +85,7 @@ where
             seq_no: Some(hdr.seq_no),
             kind: FrameKind::EndpointResponse,
         };
-        self.hdl.net.send_ty::<E::Response>(hdr, resp)
+        self.hdl.stack().send_ty::<E::Response>(hdr, resp)
     }
 }
 
@@ -102,32 +93,33 @@ where
 // TODO: Do we need some kind of Socket trait we can use to dedupe things like this?
 
 #[pin_project]
-pub struct StdBoundedEndpointSocket<E>
+pub struct StdBoundedEndpointSocket<E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
     #[pin]
-    sock: StdBoundedSocket<E::Request>,
+    sock: StdBoundedSocket<E::Request, R, M>,
 }
 
-impl<E> StdBoundedEndpointSocket<E>
+impl<E, R, M> StdBoundedEndpointSocket<E, R, M>
 where
     E: Endpoint,
     E::Request: Serialize + DeserializeOwned + 'static,
+    R: ScopedRawMutex + 'static,
+    M: InterfaceManager + 'static,
 {
-    pub fn new(bound: usize) -> Self {
+    pub fn new(stack: &'static NetStack<R, M>, bound: usize) -> Self {
         Self {
-            sock: StdBoundedSocket::new_endpoint_req::<E>(bound),
+            sock: StdBoundedSocket::new_endpoint_req::<E>(stack, bound),
         }
     }
 
-    pub fn attach<'a, R: ScopedRawMutex + 'static, M: InterfaceManager + 'static>(
-        self: Pin<&'a mut Self>,
-        stack: &'static NetStack<R, M>,
-    ) -> StdBoundedEndpointSocketHdl<'a, E, R, M> {
+    pub fn attach<'a>(self: Pin<&'a mut Self>) -> StdBoundedEndpointSocketHdl<'a, E, R, M> {
         let this = self.project();
-        let hdl: StdBoundedSocketHdl<'_, E::Request, R, M> = this.sock.attach(stack);
+        let hdl: StdBoundedSocketHdl<'_, E::Request, R, M> = this.sock.attach();
         StdBoundedEndpointSocketHdl { hdl }
     }
 }
@@ -171,7 +163,6 @@ where
             seq_no: Some(hdr.seq_no),
             kind: FrameKind::EndpointResponse,
         };
-
-        self.hdl.net.send_ty::<E::Response>(hdr, resp)
+        self.hdl.stack().send_ty::<E::Response>(hdr, resp)
     }
 }
