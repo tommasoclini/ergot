@@ -33,14 +33,15 @@ use crate::{
 
 /// The Ergot Netstack
 pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
-    pub(crate) inner: BlockingMutex<R, NetStackInner<M>>,
+    inner: BlockingMutex<R, NetStackInner<M>>,
 }
 
 pub(crate) struct NetStackInner<M: InterfaceManager> {
-    pub(crate) sockets: List<SocketHeader>,
-    pub(crate) manager: M,
-    pub(crate) port_ctr: u8,
-    pub(crate) seq_no: u16,
+    sockets: List<SocketHeader>,
+    manager: M,
+    pcache_bits: u32,
+    pcache_start: u8,
+    seq_no: u16,
 }
 
 /// An error from calling a [`NetStack`] "send" method
@@ -102,8 +103,9 @@ where
                 NetStackInner {
                     sockets: List::new(),
                     manager: m,
-                    port_ctr: 0,
                     seq_no: 0,
+                    pcache_start: 0,
+                    pcache_bits: 0,
                 },
             ),
         }
@@ -159,9 +161,9 @@ where
     ///     // (not shown: starting an `Example` service...)
     ///     # let jhdl = tokio::task::spawn(async {
     ///     #     println!("Serve!");
-    ///     #     let srv = ergot::socket::endpoint::OwnedEndpointSocket::<Example>::new();
+    ///     #     let srv = ergot::socket::endpoint::OwnedEndpointSocket::<Example, _, _>::new(&STACK);
     ///     #     let srv = core::pin::pin!(srv);
-    ///     #     let mut hdl = srv.attach(&STACK);
+    ///     #     let mut hdl = srv.attach();
     ///     #     hdl.serve(async |p| p as i32).await.unwrap();
     ///     #     println!("Served!");
     ///     # });
@@ -374,30 +376,37 @@ where
         })
     }
 
-    pub(crate) unsafe fn attach_socket(&'static self, mut node: NonNull<SocketHeader>) -> u8 {
+    pub(crate) unsafe fn try_attach_socket(&'static self, mut node: NonNull<SocketHeader>) -> Option<u8> {
         self.inner.with_lock(|inner| {
-            // TODO: smarter than this, do something like littlefs2's "next free block"
-            // bitmap thing?
-            let start = inner.port_ctr;
-            loop {
-                inner.port_ctr = inner.port_ctr.wrapping_add(1).max(1);
-                let exists = inner.sockets.iter().any(|s| {
-                    let port = s.port;
-                    port == inner.port_ctr
-                });
-                if !exists {
-                    break;
-                } else if inner.port_ctr == start {
-                    panic!("exhausted all addrs");
-                }
-            }
+            let new_port = inner.alloc_port()?;
             unsafe {
-                node.as_mut().port = inner.port_ctr;
+                node.as_mut().port = new_port;
             }
 
             inner.sockets.push_front(node);
-            inner.port_ctr
+            Some(new_port)
         })
+    }
+
+    pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
+        let res = unsafe { self.try_attach_socket(node) };
+        let Some(new_port) = res else {
+            panic!("exhausted all addrs");
+        };
+        new_port
+    }
+
+    pub(crate) unsafe fn detach_socket(&'static self, node: NonNull<SocketHeader>) {
+        self.inner
+            .with_lock(|inner| unsafe {
+                let port = node.as_ref().port;
+                inner.free_port(port);
+                inner.sockets.remove(node)
+            });
+    }
+
+    pub(crate) unsafe fn with_lock<U, F: FnOnce() -> U>(&'static self, f: F) -> U {
+        self.inner.with_lock(|_inner| f())
     }
 }
 
@@ -421,9 +430,192 @@ where
     pub const fn new() -> Self {
         Self {
             sockets: List::new(),
-            port_ctr: 0,
             manager: M::INIT,
             seq_no: 0,
+            pcache_bits: 0,
+            pcache_start: 0,
+        }
+    }
+}
+
+impl<M> NetStackInner<M>
+where
+    M: InterfaceManager,
+{
+    /// Cache-based allocator inspired by littlefs2 ID allocator
+    ///
+    /// We remember 32 ports at a time, from the current base, which is always
+    /// a multiple of 32. Allocating from this range does not require moving thru
+    /// the socket lists.
+    ///
+    /// If the current 32 ports are all taken, we will start over from a base port
+    /// of 0, and attempt to
+    fn alloc_port(&mut self) -> Option<u8> {
+        // ports 0 is always taken (could be clear on first alloc)
+        self.pcache_bits |= (self.pcache_start == 0) as u32;
+
+        if self.pcache_bits != u32::MAX {
+            // We can allocate from the current slot
+            let ldg = self.pcache_bits.trailing_ones();
+            debug_assert!(ldg < 32);
+            self.pcache_bits |= 1 << ldg;
+            return Some(self.pcache_start + (ldg as u8));
+        }
+
+        // Nope, cache is all taken. try to find a base with available items.
+        // We always start from the bottom to keep ports small, but if we know
+        // we just exhausted a range, don't waste time checking that
+        let old_start = self.pcache_start;
+        for base in 0..8 {
+            let start = base * 32;
+            if start == old_start {
+                continue;
+            }
+            // Clear/reset cache
+            self.pcache_start = start;
+            self.pcache_bits = 0;
+            // port 0 is not allowed
+            self.pcache_bits |= (self.pcache_start == 0) as u32;
+            // port 255 is not allowed
+            self.pcache_bits |= ((self.pcache_start == 0b111_00000) as u32) << 31;
+
+            // TODO: If we trust that sockets are always sorted, we could early-return
+            // when we reach a `pupper > self.pcache_start`. We could also maybe be smart
+            // and iterate forwards for 0..4 and backwards for 4..8 (and switch the early
+            // return check to < instead). NOTE: We currently do NOT guarantee sockets are
+            // sorted!
+            self.sockets.iter().for_each(|s| {
+                // The upper 3 bits of the port
+                let pupper = s.port & !(32 - 1);
+                // The lower 5 bits of the port
+                let plower = s.port & (32 - 1);
+
+                if pupper == self.pcache_start {
+                    self.pcache_bits |= 1 << plower;
+                }
+            });
+
+            if self.pcache_bits != u32::MAX {
+                // We can allocate from the current slot
+                let ldg = self.pcache_bits.trailing_ones();
+                debug_assert!(ldg < 32);
+                self.pcache_bits |= 1 << ldg;
+                return Some(self.pcache_start + (ldg as u8));
+            }
+        }
+
+        // Nope, nothing found
+        None
+    }
+
+    fn free_port(&mut self, port: u8) {
+        // The upper 3 bits of the port
+        let pupper = port & !(32 - 1);
+        // The lower 5 bits of the port
+        let plower = port & (32 - 1);
+
+        // TODO: If the freed port is in the 0..32 range, or just less than
+        // the current start range, maybe do an opportunistic re-look?
+        if pupper == self.pcache_start {
+            self.pcache_bits &= !(1 << plower);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use postcard_rpc::topic;
+    use tokio::sync::oneshot;
+    use core::pin::pin;
+    use std::thread::JoinHandle;
+
+    use crate::{interface_manager::null::NullInterfaceManager, socket::owned::OwnedSocket, NetStack};
+
+    #[test]
+    fn port_alloc() {
+        static STACK: NetStack<CriticalSectionRawMutex, NullInterfaceManager> = NetStack::new();
+        topic!(FakeTopic, u32, "lol");
+
+        let mut v = vec![];
+
+        fn spawn_skt(id: u8) -> (u8, JoinHandle<()>, oneshot::Sender<()>) {
+            let (txdone, rxdone) = oneshot::channel();
+            let (txwait, rxwait) = oneshot::channel();
+            let hdl = std::thread::spawn(move || {
+                let skt = OwnedSocket::new_topic_in::<FakeTopic>(&STACK);
+                let skt = pin!(skt);
+                let hdl = skt.attach();
+                assert_eq!(hdl.port(), id);
+                txwait.send(()).unwrap();
+                let _: () = rxdone.blocking_recv().unwrap();
+            });
+            let _ = rxwait.blocking_recv();
+            (id, hdl, txdone)
+        }
+
+        // make sockets 1..32
+        for i in 1..32 {
+            v.push(spawn_skt(i));
+        }
+
+        // make sockets 32..40
+        for i in 32..40 {
+            v.push(spawn_skt(i));
+        }
+
+        // drop socket 35
+        let pos = v.iter().position(|(i, _, _)| *i == 35).unwrap();
+        let (_i, hdl, tx)= v.remove(pos);
+        tx.send(()).unwrap();
+        hdl.join().unwrap();
+
+        // make a new socket, it should be 35
+        v.push(spawn_skt(35));
+
+        // drop socket 4
+        let pos = v.iter().position(|(i, _, _)| *i == 4).unwrap();
+        let (_i, hdl, tx)= v.remove(pos);
+        tx.send(()).unwrap();
+        hdl.join().unwrap();
+
+        // make a new socket, it should be 40
+        v.push(spawn_skt(40));
+
+        // make sockets 41..64
+        for i in 41..64 {
+            v.push(spawn_skt(i));
+        }
+
+        // make a new socket, it should be 4
+        v.push(spawn_skt(4));
+
+        // make sockets 64..255
+        for i in 64..255 {
+            v.push(spawn_skt(i));
+        }
+
+        // drop socket 212
+        let pos = v.iter().position(|(i, _, _)| *i == 212).unwrap();
+        let (_i, hdl, tx)= v.remove(pos);
+        tx.send(()).unwrap();
+        hdl.join().unwrap();
+
+        // make a new socket, it should be 212
+        v.push(spawn_skt(212));
+
+        // Sockets exhausted (we never see 255)
+        let hdl = std::thread::spawn(move || {
+            let skt = OwnedSocket::new_topic_in::<FakeTopic>(&STACK);
+            let skt = pin!(skt);
+            let hdl = skt.attach();
+            println!("{}", hdl.port());
+        });
+        assert!(hdl.join().is_err());
+
+        for (_i, hdl, tx) in v.drain(..) {
+            tx.send(()).unwrap();
+            hdl.join().unwrap();
         }
     }
 }

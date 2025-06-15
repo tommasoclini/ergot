@@ -215,7 +215,7 @@ where
     }
 
     pub fn stack(&self) -> &'static NetStack<R, M> {
-        unsafe { &*addr_of!((*self.ptr.as_ptr()).net) }
+        unsafe { *addr_of!((*self.ptr.as_ptr()).net) }
     }
 
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
@@ -234,13 +234,10 @@ where
 {
     fn drop(&mut self) {
         println!("Dropping OwnedSocket!");
-        // first things first, remove the item from the list
-        self.net.inner.with_lock(|net| {
-            let node: NonNull<SocketHeader> = NonNull::from(&self.hdr);
-            unsafe {
-                net.sockets.remove(node);
-            }
-        });
+        unsafe {
+            let this = NonNull::from(&self.hdr);
+            self.net.detach_socket(this);
+        }
     }
 }
 
@@ -274,7 +271,7 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let net: &'static NetStack<R, M> = self.hdl.stack();
-        let res = net.inner.with_lock(|_net| {
+        let f = || {
             let this_ref: &OwnedSocket<T, R, M> = unsafe { self.hdl.ptr.as_ref() };
             let box_ref: &mut OneBox<T> = unsafe { &mut *this_ref.inner.get() };
             if let Some(t) = box_ref.t.take() {
@@ -291,7 +288,8 @@ where
                 box_ref.wait = Some(new_wake.clone());
                 None
             }
-        });
+        };
+        let res = unsafe { net.with_lock(f) };
         if let Some(t) = res {
             Poll::Ready(t)
         } else {
