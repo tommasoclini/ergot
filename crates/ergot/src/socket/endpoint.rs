@@ -1,14 +1,14 @@
 use std::pin::{Pin, pin};
 
+use crate::interface_manager::InterfaceManager;
 use mutex::ScopedRawMutex;
 use pin_project::pin_project;
 use postcard_rpc::Endpoint;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{FrameKind, Header, NetStack, NetStackSendError, interface_manager::InterfaceManager};
+use ergot_base as base;
 
 use super::{
-    OwnedMessage, SocketHeaderEndpointReq,
     owned::{OwnedSocket, OwnedSocketHdl},
     std_bounded::{StdBoundedSocket, StdBoundedSocketHdl},
 };
@@ -22,7 +22,7 @@ where
     M: InterfaceManager + 'static,
 {
     #[pin]
-    sock: OwnedSocket<SocketHeaderEndpointReq, E::Request, R, M>,
+    sock: OwnedSocket<E::Request, R, M>,
 }
 
 impl<E, R, M> OwnedEndpointSocket<E, R, M>
@@ -32,7 +32,7 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub const fn new(net: &'static NetStack<R, M>) -> Self {
+    pub const fn new(net: &'static crate::NetStack<R, M>) -> Self {
         Self {
             sock: OwnedSocket::new_endpoint_req::<E>(net),
         }
@@ -40,7 +40,7 @@ where
 
     pub fn attach<'a>(self: Pin<&'a mut Self>) -> OwnedEndpointSocketHdl<'a, E, R, M> {
         let this = self.project();
-        let hdl: OwnedSocketHdl<'_, SocketHeaderEndpointReq, E::Request, R, M> = this.sock.attach();
+        let hdl: OwnedSocketHdl<'_, E::Request, R, M> = this.sock.attach();
         OwnedEndpointSocketHdl { hdl }
     }
 }
@@ -52,7 +52,7 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    hdl: OwnedSocketHdl<'a, SocketHeaderEndpointReq, E::Request, R, M>,
+    hdl: OwnedSocketHdl<'a, E::Request, R, M>,
 }
 
 impl<E, R, M> OwnedEndpointSocketHdl<'_, E, R, M>
@@ -62,28 +62,28 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub async fn recv_manual(&mut self) -> OwnedMessage<E::Request> {
+    pub async fn recv_manual(&mut self) -> base::socket::OwnedMessage<E::Request> {
         self.hdl.recv().await
     }
 
     pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(
         &mut self,
         f: F,
-    ) -> Result<(), NetStackSendError>
+    ) -> Result<(), base::net_stack::NetStackSendError>
     where
         E::Response: Serialize + DeserializeOwned + 'static,
     {
         let msg = self.hdl.recv().await;
-        let OwnedMessage { hdr, t } = msg;
+        let base::socket::OwnedMessage { hdr, t } = msg;
         let resp = f(t).await;
 
         // NOTE: We swap src/dst, AND we go from req -> resp (both in kind and key)
-        let hdr: Header = Header {
+        let hdr: base::Header = base::Header {
             src: hdr.dst,
             dst: hdr.src,
-            key: Some(E::RESP_KEY),
+            key: Some(base::Key(E::RESP_KEY.to_bytes())),
             seq_no: Some(hdr.seq_no),
-            kind: FrameKind::EndpointResponse,
+            kind: base::FrameKind::ENDPOINT_RESP,
         };
         self.hdl.stack().send_ty::<E::Response>(hdr, resp)
     }
@@ -101,7 +101,7 @@ where
     M: InterfaceManager + 'static,
 {
     #[pin]
-    sock: StdBoundedSocket<SocketHeaderEndpointReq, E::Request, R, M>,
+    sock: StdBoundedSocket<E::Request, R, M>,
 }
 
 impl<E, R, M> StdBoundedEndpointSocket<E, R, M>
@@ -111,7 +111,7 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub fn new(stack: &'static NetStack<R, M>, bound: usize) -> Self {
+    pub fn new(stack: &'static base::net_stack::NetStack<R, M>, bound: usize) -> Self {
         Self {
             sock: StdBoundedSocket::new_endpoint_req::<E>(stack, bound),
         }
@@ -119,8 +119,7 @@ where
 
     pub fn attach<'a>(self: Pin<&'a mut Self>) -> StdBoundedEndpointSocketHdl<'a, E, R, M> {
         let this = self.project();
-        let hdl: StdBoundedSocketHdl<'_, SocketHeaderEndpointReq, E::Request, R, M> =
-            this.sock.attach();
+        let hdl: StdBoundedSocketHdl<'_, E::Request, R, M> = this.sock.attach();
         StdBoundedEndpointSocketHdl { hdl }
     }
 }
@@ -132,7 +131,7 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    hdl: StdBoundedSocketHdl<'a, SocketHeaderEndpointReq, E::Request, R, M>,
+    hdl: StdBoundedSocketHdl<'a, E::Request, R, M>,
 }
 
 impl<E, R, M> StdBoundedEndpointSocketHdl<'_, E, R, M>
@@ -142,27 +141,27 @@ where
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub async fn recv_manual(&mut self) -> OwnedMessage<E::Request> {
+    pub async fn recv_manual(&mut self) -> base::socket::OwnedMessage<E::Request> {
         self.hdl.recv().await
     }
 
     pub async fn serve<F: AsyncFnOnce(E::Request) -> E::Response>(
         &mut self,
         f: F,
-    ) -> Result<(), NetStackSendError>
+    ) -> Result<(), base::net_stack::NetStackSendError>
     where
         E::Response: Serialize + DeserializeOwned + 'static,
     {
         let msg = self.hdl.recv().await;
-        let OwnedMessage { hdr, t } = msg;
+        let base::socket::OwnedMessage { hdr, t } = msg;
         let resp = f(t).await;
         // NOTE: We swap src/dst, AND we go from req -> resp (both in kind and key)
-        let hdr: Header = Header {
+        let hdr: base::Header = base::Header {
             src: hdr.dst,
             dst: hdr.src,
-            key: Some(E::RESP_KEY),
+            key: Some(base::Key(E::RESP_KEY.to_bytes())),
             seq_no: Some(hdr.seq_no),
-            kind: FrameKind::EndpointResponse,
+            kind: base::FrameKind::ENDPOINT_RESP,
         };
         self.hdl.stack().send_ty::<E::Response>(hdr, resp)
     }

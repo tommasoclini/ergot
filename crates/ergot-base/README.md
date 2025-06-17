@@ -1,4 +1,4 @@
-# `ergot`
+# `ergot-base`
 
 *The latest in unsafe network stacks.*
 

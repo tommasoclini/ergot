@@ -1,31 +1,24 @@
 use std::{pin::pin, time::Duration};
 
-use ergot::{
-    NetStack,
-    ergot_base::{Address, FrameKind, Header}, interface_manager::null::NullInterfaceManager,
-    socket::endpoint::OwnedEndpointSocket,
+use ergot_base::{
+    Address, FrameKind, Header, Key, NetStack, interface_manager::null::NullInterfaceManager,
+    socket::owned::OwnedSocket,
 };
-use ergot_base::Key;
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
-use postcard_rpc::{Endpoint, endpoint};
-use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
-use tokio::{spawn, time::{sleep, timeout}};
+use tokio::{spawn, time::sleep};
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Schema)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Example {
     a: u8,
     b: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Schema)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Other {
     a: u64,
     b: i32,
 }
-
-endpoint!(ExampleEndpoint, Example, u32, "example");
-endpoint!(OtherEndpoint, Other, u32, "other");
 
 type TestNetStack = NetStack<CriticalSectionRawMutex, NullInterfaceManager>;
 
@@ -44,7 +37,8 @@ async fn hello() {
     };
 
     {
-        let socket = OwnedEndpointSocket::<ExampleEndpoint, _, _>::new(&STACK);
+        let socket =
+            OwnedSocket::<Example, _, _>::new(&STACK, Key(*b"TEST1234"), FrameKind::ENDPOINT_REQ);
         let mut socket = pin!(socket);
         let mut hdl = socket.as_mut().attach();
 
@@ -57,7 +51,7 @@ async fn hello() {
                     Header {
                         src,
                         dst,
-                        key: Some(Key(OtherEndpoint::REQ_KEY.to_bytes())),
+                        key: Some(Key(*b"1234TEST")),
                         seq_no: None,
                         kind: FrameKind::ENDPOINT_REQ,
                     },
@@ -70,7 +64,7 @@ async fn hello() {
                     Header {
                         src,
                         dst,
-                        key: Some(Key(ExampleEndpoint::REQ_KEY.to_bytes())),
+                        key: Some(Key(*b"TEST1234")),
                         seq_no: None,
                         kind: FrameKind::ENDPOINT_REQ,
                     },
@@ -87,7 +81,7 @@ async fn hello() {
                     Header {
                         src,
                         dst,
-                        key: Some(Key(ExampleEndpoint::REQ_KEY.to_bytes())),
+                        key: Some(Key(*b"TEST1234")),
                         seq_no: None,
                         kind: FrameKind::ENDPOINT_REQ,
                     },
@@ -96,7 +90,7 @@ async fn hello() {
                 .unwrap();
         });
 
-        let msg = hdl.recv_manual().await;
+        let msg = hdl.recv().await;
         assert_eq!(
             Address {
                 network_id: 0,
@@ -115,7 +109,7 @@ async fn hello() {
         );
         assert_eq!(Example { a: 42, b: 789 }, msg.t);
 
-        let msg = hdl.recv_manual().await;
+        let msg = hdl.recv().await;
 
         assert_eq!(
             Address {
@@ -144,7 +138,7 @@ async fn hello() {
             Header {
                 src,
                 dst,
-                key: Some(Key(OtherEndpoint::REQ_KEY.to_bytes())),
+                key: Some(Key(*b"1234TEST")),
                 seq_no: None,
                 kind: FrameKind::ENDPOINT_REQ,
             },
@@ -156,58 +150,11 @@ async fn hello() {
             Header {
                 src,
                 dst,
-                key: Some(Key(ExampleEndpoint::REQ_KEY.to_bytes())),
+                key: Some(Key(*b"TEST1234")),
                 seq_no: None,
                 kind: FrameKind::ENDPOINT_REQ,
             },
             Example { a: 42, b: 789 },
         )
         .unwrap_err();
-}
-
-#[tokio::test]
-async fn req_resp() {
-    static STACK: TestNetStack = NetStack::new();
-
-    // Start the server...
-    let server = OwnedEndpointSocket::<ExampleEndpoint, _, _>::new(&STACK);
-    let server = pin!(server);
-    let mut server_hdl = server.attach();
-
-    let reqqr = tokio::task::spawn(async {
-        for i in 0..3 {
-            sleep(Duration::from_millis(100)).await;
-
-            // Make the request, look ma only the stack handle
-            let resp = STACK
-                .req_resp::<ExampleEndpoint>(
-                    Address {
-                        network_id: 0,
-                        node_id: 0,
-                        port_id: 0,
-                    },
-                    Example {
-                        a: i as u8,
-                        b: i * 10,
-                    },
-                )
-                .await
-                .unwrap();
-
-            println!("RESP: {resp:?}");
-        }
-    });
-
-    // normally you'd do this in a loop...
-    for _i in 0..3 {
-        let srv = timeout(Duration::from_secs(1), server_hdl
-            .serve(async |req| {
-                // fn(Example) -> u32
-                req.b + 5
-            }))
-            .await;
-        println!("SERV: {srv:?}");
-    }
-
-    reqqr.await.unwrap();
 }
