@@ -98,6 +98,11 @@ impl InterfaceManager for StdTcpClientIm {
         if hdr.dst.network_id == intfc.net_id && hdr.dst.node_id == 2 {
             return Err(InterfaceSendError::DestinationLocal);
         }
+
+        // Now that we've filtered out "dest local" checks, see if there is
+        // any TTL left before we send to the next hop
+        hdr.decrement_ttl()?;
+
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
         if hdr.src.net_node_any() {
@@ -117,6 +122,7 @@ impl InterfaceManager for StdTcpClientIm {
                 seq_no,
                 key: hdr.key,
                 kind: hdr.kind,
+                ttl: hdr.ttl,
             },
             body: postcard::to_stdvec(data).unwrap(),
         });
@@ -150,6 +156,11 @@ impl InterfaceManager for StdTcpClientIm {
         if hdr.dst.network_id == intfc.net_id && hdr.dst.node_id == 2 {
             return Err(InterfaceSendError::DestinationLocal);
         }
+
+        // Now that we've filtered out "dest local" checks, see if there is
+        // any TTL left before we send to the next hop
+        hdr.decrement_ttl()?;
+
         // If the source is local, rewrite the source using this interface's
         // information so responses can find their way back here
         if hdr.src.net_node_any() {
@@ -169,6 +180,7 @@ impl InterfaceManager for StdTcpClientIm {
                 seq_no,
                 key: hdr.key,
                 kind: hdr.kind,
+                ttl: hdr.ttl,
             },
             body: data.to_vec(),
         });
