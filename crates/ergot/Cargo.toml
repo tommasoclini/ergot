@@ -1,6 +1,6 @@
 [package]
 name = "ergot"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["James Munns <james@onevariable.com>"]
 edition = "2024"
 readme = "README.md"
@@ -15,10 +15,10 @@ keywords = []
 documentation = "https://docs.rs/ergot/"
 
 [dependencies]
-cobs                = "0.3.0"
-cordyceps           = "0.3.4"
-pin-project         = "1.1.10"
-postcard-rpc        = "0.11.9"
+cobs            = "0.3.0"
+cordyceps       = "0.3.4"
+pin-project     = "1.1.10"
+postcard-rpc    = "0.11.9"
 
 critical-section    = { version = "1.2.0",  features = ["std"] }
 maitake-sync        = { version = "0.2.1",  features = ["std"] }
@@ -28,4 +28,4 @@ postcard-schema     = { version = "0.2.1",  features = ["derive"] }
 serde               = { version = "1.0",    features = ["derive"] }
 tokio               = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }
 
-ergot-base = { version = "0.1.0", path = "../ergot-base" }
+ergot-base = { version = "0.2.0", path = "../ergot-base" }
