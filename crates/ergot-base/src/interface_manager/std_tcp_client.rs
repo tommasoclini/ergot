@@ -20,6 +20,7 @@ use super::{
         de_frame,
     },
 };
+use log::{debug, error, info, warn};
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
 use tokio::{
@@ -78,7 +79,7 @@ impl ConstInit for StdTcpClientIm {
 impl InterfaceManager for StdTcpClientIm {
     fn send<T: serde::Serialize>(
         &mut self,
-        mut hdr: Header,
+        hdr: &Header,
         data: &T,
     ) -> Result<(), InterfaceSendError> {
         let Some(intfc) = self.inner.as_mut() else {
@@ -101,6 +102,7 @@ impl InterfaceManager for StdTcpClientIm {
 
         // Now that we've filtered out "dest local" checks, see if there is
         // any TTL left before we send to the next hop
+        let mut hdr = hdr.clone();
         hdr.decrement_ttl()?;
 
         // If the source is local, rewrite the source using this interface's
@@ -111,6 +113,13 @@ impl InterfaceManager for StdTcpClientIm {
             // addresses
             hdr.src.network_id = intfc.net_id;
             hdr.src.node_id = 2;
+        }
+
+        // If this is a broadcast message, update the destination, ignoring
+        // whatever was there before
+        if hdr.dst.port_id == 255 {
+            hdr.dst.network_id = intfc.net_id;
+            hdr.dst.node_id = 1;
         }
 
         let seq_no = self.seq_no;
@@ -138,7 +147,7 @@ impl InterfaceManager for StdTcpClientIm {
         }
     }
 
-    fn send_raw(&mut self, mut hdr: Header, data: &[u8]) -> Result<(), InterfaceSendError> {
+    fn send_raw(&mut self, hdr: &Header, data: &[u8]) -> Result<(), InterfaceSendError> {
         let Some(intfc) = self.inner.as_mut() else {
             return Err(InterfaceSendError::NoRouteToDest);
         };
@@ -159,6 +168,7 @@ impl InterfaceManager for StdTcpClientIm {
 
         // Now that we've filtered out "dest local" checks, see if there is
         // any TTL left before we send to the next hop
+        let mut hdr = hdr.clone();
         hdr.decrement_ttl()?;
 
         // If the source is local, rewrite the source using this interface's
@@ -169,6 +179,13 @@ impl InterfaceManager for StdTcpClientIm {
             // addresses
             hdr.src.network_id = intfc.net_id;
             hdr.src.node_id = 2;
+        }
+
+        // If this is a broadcast message, update the destination, ignoring
+        // whatever was there before
+        if hdr.dst.port_id == 255 {
+            hdr.dst.network_id = intfc.net_id;
+            hdr.dst.node_id = 1;
         }
 
         let seq_no = self.seq_no;
@@ -218,7 +235,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                 r = rd => {
                     match r {
                         Ok(0) | Err(_) => {
-                            println!("recv run closed");
+                            warn!("recv run closed");
                             return Err(ReceiverError::SocketClosed)
                         },
                         Ok(ct) => ct,
@@ -241,7 +258,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                         // Successfully de-cobs'd a packet, now we need to
                         // do something with it.
                         if let Some(mut frame) = de_frame(data) {
-                            println!("Got Frame!");
+                            debug!("Got Frame!");
                             let take_net = net_id.is_none()
                                 || net_id.is_some_and(|n| {
                                     frame.hdr.dst.network_id != 0 && n != frame.hdr.dst.network_id
@@ -282,7 +299,9 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let res = self.stack.send_raw(frame.hdr.into(), &frame.body);
+                            let hdr = frame.hdr.clone();
+                            let hdr: Header = hdr.into();
+                            let res = self.stack.send_raw(&hdr, &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {
@@ -291,7 +310,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                                 }
                             }
                         } else {
-                            println!(
+                            warn!(
                                 "Decode error! Ignoring frame on net_id {}",
                                 net_id.unwrap_or(0)
                             );
@@ -336,7 +355,7 @@ pub fn register_interface<R: ScopedRawMutex>(
 }
 
 async fn tx_worker(mut tx: OwnedWriteHalf, mut rx: Receiver<OwnedFrame>, closer: Arc<WaitQueue>) {
-    println!("Started tx_worker");
+    info!("Started tx_worker");
     loop {
         let rxf = rx.recv();
         let clf = closer.wait();
@@ -346,7 +365,7 @@ async fn tx_worker(mut tx: OwnedWriteHalf, mut rx: Receiver<OwnedFrame>, closer:
                 if let Some(frame) = r {
                     frame
                 } else {
-                    println!("tx_workerrx closed!");
+                    warn!("tx_workerrx closed!");
                     closer.close();
                     break;
                 }
@@ -357,13 +376,13 @@ async fn tx_worker(mut tx: OwnedWriteHalf, mut rx: Receiver<OwnedFrame>, closer:
         };
 
         let msg = ser_frame(frame);
-        println!("sending pkt len:{}", msg.len());
+        info!("sending pkt len:{}", msg.len());
         let res = tx.write_all(&msg).await;
         if let Err(e) = res {
-            println!("Err: {e:?}");
+            error!("Err: {e:?}");
             break;
         }
     }
     // TODO: GC waker?
-    println!("Closing interface");
+    warn!("Closing interface");
 }

@@ -21,6 +21,7 @@ use std::{cell::UnsafeCell, mem::MaybeUninit};
 
 use crate::{Header, NetStack, interface_manager::std_utils::ser_frame};
 
+use log::{debug, error, info, trace, warn};
 use maitake_sync::WaitQueue;
 use mutex::ScopedRawMutex;
 use tokio::sync::mpsc::Sender;
@@ -113,7 +114,7 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                 r = rd => {
                     match r {
                         Ok(0) | Err(_) => {
-                            println!("recv run {} closed", self.net_id);
+                            warn!("recv run {} closed", self.net_id);
                             return Err(ReceiverError::SocketClosed)
                         },
                         Ok(ct) => ct,
@@ -156,16 +157,18 @@ impl<R: ScopedRawMutex + 'static> StdTcpRecvHdl<R> {
                             //
                             // If the dest is 0, should we rewrite the dest as self.net_id? This
                             // is the opposite as above, but I dunno how that will work with responses
-                            let res = self.stack.send_raw(frame.hdr.into(), &frame.body);
+                            let hdr = frame.hdr.clone();
+                            let hdr: Header = hdr.into();
+                            let res = self.stack.send_raw(&hdr, &frame.body);
                             match res {
                                 Ok(()) => {}
                                 Err(e) => {
                                     // TODO: match on error, potentially try to send NAK?
-                                    panic!("recv->send error: {e:?}");
+                                    warn!("recv->send error: {e:?}");
                                 }
                             }
                         } else {
-                            println!("Decode error! Ignoring frame on net_id {}", self.net_id);
+                            warn!("Decode error! Ignoring frame on net_id {}", self.net_id);
                         }
 
                         remaining
@@ -206,7 +209,7 @@ impl StdTcpIm {
 impl InterfaceManager for StdTcpIm {
     fn send<T: serde::Serialize>(
         &mut self,
-        mut hdr: Header,
+        hdr: &Header,
         data: &T,
     ) -> Result<(), InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
@@ -230,6 +233,7 @@ impl InterfaceManager for StdTcpIm {
 
         // Now that we've filtered out "dest local" checks, see if there is
         // any TTL left before we send to the next hop
+        let mut hdr = hdr.clone();
         hdr.decrement_ttl()?;
 
         // If the source is local, rewrite the source using this interface's
@@ -261,7 +265,7 @@ impl InterfaceManager for StdTcpIm {
         }
     }
 
-    fn send_raw(&mut self, mut hdr: Header, data: &[u8]) -> Result<(), InterfaceSendError> {
+    fn send_raw(&mut self, hdr: &Header, data: &[u8]) -> Result<(), InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
         assert!(!(hdr.dst.port_id == 0 && hdr.key.is_none()));
 
@@ -284,6 +288,7 @@ impl InterfaceManager for StdTcpIm {
 
         // Now that we've filtered out "dest local" checks, see if there is
         // any TTL left before we send to the next hop
+        let mut hdr = hdr.clone();
         hdr.decrement_ttl()?;
 
         // If the source is local, rewrite the source using this interface's
@@ -344,10 +349,10 @@ impl StdTcpImInner {
                 skt_tx: ctx,
                 closer: closer.clone(),
             });
-            println!("Alloc'd net_id 1");
+            debug!("Alloc'd net_id 1");
             return Some((net_id, closer));
         } else if self.interfaces.len() >= 65534 {
-            println!("Out of netids!");
+            warn!("Out of netids!");
             return None;
         }
 
@@ -356,7 +361,7 @@ impl StdTcpImInner {
             self.interfaces.retain(|int| {
                 let closed = int.closer.is_closed();
                 if closed {
-                    println!("Collecting interface {}", int.net_id);
+                    info!("Collecting interface {}", int.net_id);
                 }
                 !closed
             });
@@ -367,7 +372,7 @@ impl StdTcpImInner {
         // indexes, and if we find a discontinuity, allocate the first one.
         for intfc in self.interfaces.iter() {
             if intfc.net_id > net_id {
-                println!("Found gap: {net_id}");
+                trace!("Found gap: {net_id}");
                 break;
             }
             debug_assert!(intfc.net_id == net_id);
@@ -378,7 +383,7 @@ impl StdTcpImInner {
         // have not exhausted the range.
         debug_assert!(net_id > 0 && net_id != u16::MAX);
         let (ctx, crx) = channel(64);
-        println!("allocated net_id {net_id}");
+        debug!("allocated net_id {net_id}");
 
         tokio::task::spawn(tx_worker(net_id, tx, crx, closer.clone()));
         self.interfaces.push(StdTcpTxHdl {
@@ -399,7 +404,7 @@ async fn tx_worker(
     mut rx: Receiver<OwnedFrame>,
     closer: Arc<WaitQueue>,
 ) {
-    println!("Started tx_worker for net_id {net_id}");
+    info!("Started tx_worker for net_id {net_id}");
     loop {
         let rxf = rx.recv();
         let clf = closer.wait();
@@ -409,7 +414,7 @@ async fn tx_worker(
                 if let Some(frame) = r {
                     frame
                 } else {
-                    println!("tx_worker {net_id} rx closed!");
+                    warn!("tx_worker {net_id} rx closed!");
                     closer.close();
                     break;
                 }
@@ -420,15 +425,15 @@ async fn tx_worker(
         };
 
         let msg = ser_frame(frame);
-        println!("sending pkt len:{} on net_id {net_id}", msg.len());
+        debug!("sending pkt len:{} on net_id {net_id}", msg.len());
         let res = tx.write_all(&msg).await;
         if let Err(e) = res {
-            println!("Err: {e:?}");
+            error!("Err: {e:?}");
             break;
         }
     }
     // TODO: GC waker?
-    println!("Closing interface {net_id}");
+    warn!("Closing interface {net_id}");
 }
 
 pub fn register_interface<R: ScopedRawMutex>(

@@ -23,7 +23,7 @@ use core::pin::pin;
 
 use base::net_stack::NetStackSendError;
 use mutex::{ConstInit, ScopedRawMutex};
-use postcard_rpc::Endpoint;
+use postcard_rpc::{Endpoint, Topic};
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -213,11 +213,39 @@ where
             kind: FrameKind::ENDPOINT_REQ,
             ttl: base::DEFAULT_TTL,
         };
-        self.send_ty(hdr, req)?;
+        self.send_ty(&hdr, req)?;
         // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
         // port ids now?
         let resp = resp_hdl.recv().await;
         Ok(resp.t)
+    }
+
+    pub async fn broadcast_topic<T>(
+        &'static self,
+        msg: &T::Message,
+    ) -> Result<(), NetStackSendError>
+    where
+        T: Topic,
+        T::Message: Serialize + Clone + DeserializeOwned + 'static,
+    {
+        let hdr = Header {
+            src: Address {
+                network_id: 0,
+                node_id: 0,
+                port_id: 0,
+            },
+            dst: Address {
+                network_id: 0,
+                node_id: 0,
+                port_id: 255,
+            },
+            key: Some(base::Key(T::TOPIC_KEY.to_bytes())),
+            seq_no: None,
+            kind: FrameKind::TOPIC_MSG,
+            ttl: base::DEFAULT_TTL,
+        };
+        self.send_ty(&hdr, msg)?;
+        Ok(())
     }
 
     /// Send a raw (pre-serialized) message.
@@ -225,7 +253,7 @@ where
     /// This interface should almost never be used by end-users, and is instead
     /// typically used by interfaces to feed received messages into the
     /// [`NetStack`].
-    pub fn send_raw(&'static self, hdr: Header, body: &[u8]) -> Result<(), NetStackSendError> {
+    pub fn send_raw(&'static self, hdr: &Header, body: &[u8]) -> Result<(), NetStackSendError> {
         self.inner.send_raw(hdr, body)
     }
 
@@ -243,7 +271,7 @@ where
     /// [`Topic::TOPIC_KEY`]: postcard_rpc::Topic::TOPIC_KEY
     pub fn send_ty<T: 'static + Serialize + Clone>(
         &'static self,
-        hdr: Header,
+        hdr: &Header,
         t: &T,
     ) -> Result<(), NetStackSendError> {
         self.inner.send_ty(hdr, t)

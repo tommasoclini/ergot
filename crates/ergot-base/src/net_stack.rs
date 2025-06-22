@@ -21,6 +21,7 @@
 use core::{any::TypeId, ptr::NonNull};
 
 use cordyceps::List;
+use log::{debug, trace};
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
 use serde::Serialize;
 
@@ -52,6 +53,8 @@ pub enum NetStackSendError {
     NoRoute,
     AnyPortMissingKey,
     WrongPortKind,
+    AnyPortNotUnique,
+    AllPortMissingKey,
 }
 
 // ---- impl NetStack ----
@@ -146,27 +149,17 @@ where
     /// This interface should almost never be used by end-users, and is instead
     /// typically used by interfaces to feed received messages into the
     /// [`NetStack`].
-    pub fn send_raw(&'static self, hdr: Header, body: &[u8]) -> Result<(), NetStackSendError> {
-        if hdr.dst.port_id == 0 && hdr.key.is_none() {
-            return Err(NetStackSendError::AnyPortMissingKey);
-        }
-        let local_bypass = hdr.src.net_node_any() && hdr.dst.net_node_any();
-
-        self.inner
-            .with_lock(|inner| inner.send_raw(local_bypass, hdr, body))
+    pub fn send_raw(&'static self, hdr: &Header, body: &[u8]) -> Result<(), NetStackSendError> {
+        self.inner.with_lock(|inner| inner.send_raw(hdr, body))
     }
 
     /// Send a typed message
     pub fn send_ty<T: 'static + Serialize + Clone>(
         &'static self,
-        hdr: Header,
+        hdr: &Header,
         t: &T,
     ) -> Result<(), NetStackSendError> {
-        // Can we assume the destination is local?
-        let local_bypass = hdr.src.net_node_any() && hdr.dst.net_node_any();
-
-        self.inner
-            .with_lock(|inner| inner.send_ty(local_bypass, hdr, t))
+        self.inner.with_lock(|inner| inner.send_ty(hdr, t))
     }
 
     pub(crate) unsafe fn try_attach_socket(
@@ -184,6 +177,15 @@ where
         })
     }
 
+    pub(crate) unsafe fn attach_broadcast_socket(&'static self, mut node: NonNull<SocketHeader>) {
+        self.inner.with_lock(|inner| {
+            unsafe {
+                node.as_mut().port = 255;
+            }
+            inner.sockets.push_back(node);
+        });
+    }
+
     pub(crate) unsafe fn attach_socket(&'static self, node: NonNull<SocketHeader>) -> u8 {
         let res = unsafe { self.try_attach_socket(node) };
         let Some(new_port) = res else {
@@ -195,7 +197,9 @@ where
     pub(crate) unsafe fn detach_socket(&'static self, node: NonNull<SocketHeader>) {
         self.inner.with_lock(|inner| unsafe {
             let port = node.as_ref().port;
-            inner.free_port(port);
+            if port != 255 {
+                inner.free_port(port);
+            }
             inner.sockets.remove(node)
         });
     }
@@ -237,130 +241,292 @@ impl<M> NetStackInner<M>
 where
     M: InterfaceManager,
 {
-    fn send_raw(
-        &mut self,
-        local_bypass: bool,
-        hdr: Header,
-        body: &[u8],
-    ) -> Result<(), NetStackSendError> {
-        let res = if !local_bypass {
-            self.manager.send_raw(hdr.clone(), body)
-        } else {
-            Err(InterfaceSendError::DestinationLocal)
+    /// Method that handles broadcast logic
+    ///
+    /// Takes closures for sending to a socket or sending to the manager to allow
+    /// for abstracting over send_raw/send_ty.
+    fn broadcast<SendSocket, SendMgr>(
+        sockets: &mut List<SocketHeader>,
+        hdr: &Header,
+        mut sskt: SendSocket,
+        smgr: SendMgr,
+    ) -> Result<(), NetStackSendError>
+    where
+        SendSocket: FnMut(NonNull<SocketHeader>) -> bool,
+        SendMgr: FnOnce() -> bool,
+    {
+        trace!("Sending msg broadcast w/ header: {hdr:?}");
+        let res_lcl = {
+            let bcast_iter = Self::find_all_local(sockets, hdr)?;
+            let mut any_found = false;
+            for dst in bcast_iter {
+                let res = sskt(dst);
+                if res {
+                    debug!("delivered broadcast message locally");
+                }
+                any_found |= res;
+            }
+            any_found
         };
 
-        match res {
-            Ok(()) => return Ok(()),
-            Err(InterfaceSendError::DestinationLocal) => {}
-            Err(e) => return Err(NetStackSendError::InterfaceSend(e)),
+        let res_rmt = smgr();
+        if res_rmt {
+            debug!("delivered broadcast message remotely");
         }
-        // It was a destination local error, try to honor that
-        for socket in self.sockets.iter_raw() {
-            let skt_ref = unsafe { socket.as_ref() };
-            if hdr.kind != skt_ref.kind {
-                if hdr.dst.port_id != 0 && hdr.dst.port_id == skt_ref.port {
-                    // If kind mismatch and not wildcard: report error
-                    return Err(NetStackSendError::WrongPortKind);
-                } else {
-                    continue;
-                }
-            }
-            // TODO: only allow port_id == 0 if there is only one matching port
-            // with this key.
-            if (skt_ref.port == hdr.dst.port_id)
-                || (hdr.dst.port_id == 0 && hdr.key.is_some_and(|k| k == skt_ref.key))
-            {
-                let res = {
-                    let f = skt_ref.vtable.send_raw;
 
-                    // SAFETY: skt_ref is now dead to us!
-
-                    let this: NonNull<SocketHeader> = socket;
-                    let this: NonNull<()> = this.cast();
-                    let hdr = hdr.to_headerseq_or_with_seq(|| {
-                        let seq = self.seq_no;
-                        self.seq_no = self.seq_no.wrapping_add(1);
-                        seq
-                    });
-
-                    (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
-                };
-                return res;
-            }
+        if res_lcl || res_rmt {
+            Ok(())
+        } else {
+            Err(NetStackSendError::NoRoute)
         }
-        Err(NetStackSendError::NoRoute)
     }
 
-    fn send_ty<T: 'static + Serialize + Clone>(
-        &mut self,
-        local_bypass: bool,
-        hdr: Header,
-        t: &T,
-    ) -> Result<(), NetStackSendError> {
+    /// Method that handles unicast logic
+    ///
+    /// Takes closures for sending to a socket or sending to the manager to allow
+    /// for abstracting over send_raw/send_ty.
+    fn unicast<SendSocket, SendMgr>(
+        sockets: &mut List<SocketHeader>,
+        hdr: &Header,
+        sskt: SendSocket,
+        smgr: SendMgr,
+    ) -> Result<(), NetStackSendError>
+    where
+        SendSocket: FnOnce(NonNull<SocketHeader>) -> Result<(), NetStackSendError>,
+        SendMgr: FnOnce() -> Result<(), InterfaceSendError>,
+    {
+        trace!("Sending msg unicast w/ header: {hdr:?}");
+        // Can we assume the destination is local?
+        let local_bypass = hdr.src.net_node_any() && hdr.dst.net_node_any();
+
         let res = if !local_bypass {
             // Not local: offer to the interface manager to send
-            self.manager.send(hdr.clone(), &t)
+            debug!("Offering msg externally unicast w/ header: {hdr:?}");
+            smgr()
         } else {
             // just skip to local sending
             Err(InterfaceSendError::DestinationLocal)
         };
 
         match res {
-            Ok(()) => return Ok(()),
-            Err(InterfaceSendError::DestinationLocal) => {}
+            Ok(()) => {
+                debug!("Externally routed msg unicast");
+                return Ok(());
+            }
+            Err(InterfaceSendError::DestinationLocal) => {
+                debug!("No external interest in msg unicast");
+            }
             Err(e) => return Err(NetStackSendError::InterfaceSend(e)),
         }
 
         // It was a destination local error, try to honor that
-        //
-        // Check each socket to see if we want to send it there...
-        for socket in self.sockets.iter_raw() {
-            let skt_ref = unsafe { socket.as_ref() };
+        let socket = if hdr.dst.port_id == 0 {
+            debug!("Sending ANY unicast msg locally w/ header: {hdr:?}");
+            Self::find_any_local(sockets, hdr)
+        } else {
+            debug!("Sending ONE unicast msg locally w/ header: {hdr:?}");
+            Self::find_one_local(sockets, hdr)
+        }?;
 
-            if hdr.kind != skt_ref.kind {
-                if hdr.dst.port_id != 0 && hdr.dst.port_id == skt_ref.port {
-                    // If kind mismatch and not wildcard: report error
-                    return Err(NetStackSendError::WrongPortKind);
-                } else {
-                    continue;
-                }
+        sskt(socket)
+    }
+
+    /// Handle sending of a raw (serialized) message
+    fn send_raw(&mut self, hdr: &Header, body: &[u8]) -> Result<(), NetStackSendError> {
+        let Self {
+            sockets,
+            seq_no,
+            manager,
+            ..
+        } = self;
+        trace!("Sending msg raw w/ header: {hdr:?}");
+
+        // Is this a broadcast message?
+        if hdr.dst.port_id == 255 {
+            Self::broadcast(
+                sockets,
+                hdr,
+                |skt| Self::send_raw_to_socket(skt, body, hdr, seq_no).is_ok(),
+                || manager.send_raw(hdr, body).is_ok(),
+            )
+        } else {
+            Self::unicast(
+                sockets,
+                hdr,
+                |skt| Self::send_raw_to_socket(skt, body, hdr, seq_no),
+                || manager.send_raw(hdr, body),
+            )
+        }
+    }
+
+    /// Handle sending of a typed message
+    fn send_ty<T: 'static + Serialize + Clone>(
+        &mut self,
+        hdr: &Header,
+        t: &T,
+    ) -> Result<(), NetStackSendError> {
+        let Self {
+            sockets,
+            seq_no,
+            manager,
+            ..
+        } = self;
+        trace!("Sending msg ty w/ header: {hdr:?}");
+
+        // Is this a broadcast message?
+        if hdr.dst.port_id == 255 {
+            Self::broadcast(
+                sockets,
+                hdr,
+                |skt| Self::send_ty_to_socket(skt, t, hdr, seq_no).is_ok(),
+                || manager.send(hdr, t).is_ok(),
+            )
+        } else {
+            Self::unicast(
+                sockets,
+                hdr,
+                |skt| Self::send_ty_to_socket(skt, t, hdr, seq_no),
+                || manager.send(hdr, t),
+            )
+        }
+    }
+
+    /// Find a specific (e.g. port_id not 0 or 255) destination port matching
+    /// the given header.
+    fn find_one_local(
+        sockets: &mut List<SocketHeader>,
+        hdr: &Header,
+    ) -> Result<NonNull<SocketHeader>, NetStackSendError> {
+        // Find the specific matching port
+        let mut iter = sockets.iter_raw();
+        let socket = loop {
+            let Some(skt) = iter.next() else {
+                return Err(NetStackSendError::NoRoute);
+            };
+            let skt_ref = unsafe { skt.as_ref() };
+            if skt_ref.port != hdr.dst.port_id {
+                continue;
             }
-
-            // TODO: only allow port_id == 0 if there is only one matching port
-            // with this key.
-            if (skt_ref.port == hdr.dst.port_id || hdr.dst.port_id == 0)
-                && hdr.key.unwrap() == skt_ref.key
-            {
-                let vtable: &'static SocketVTable = skt_ref.vtable;
-                // SAFETY: skt_ref is now dead to us!
-
-                if let Some(f) = vtable.send_owned {
-                    let this: NonNull<SocketHeader> = socket;
-                    let this: NonNull<()> = this.cast();
-                    let that: NonNull<T> = NonNull::from(t);
-                    let that: NonNull<()> = that.cast();
-                    let hdr = hdr.to_headerseq_or_with_seq(|| {
-                        let seq = self.seq_no;
-                        self.seq_no = self.seq_no.wrapping_add(1);
-                        seq
-                    });
-                    (f)(this, that, hdr, &TypeId::of::<T>()).map_err(NetStackSendError::SocketSend)
-                } else if let Some(_f) = vtable.send_bor {
-                    // TODO: if we support send borrowed, then we need to
-                    // drop the manuallydrop here, success or failure.
-                    todo!()
-                } else {
-                    // todo: keep going? If we found the "right" destination and
-                    // sending fails, then there's not much we can do. Probably: there
-                    // is no case where a socket has NEITHER send_owned NOR send_bor,
-                    // can we make this state impossible instead?
-                    Err(NetStackSendError::SocketSend(SocketSendError::WhatTheHell))
-                }?;
+            if skt_ref.kind != hdr.kind {
+                return Err(NetStackSendError::WrongPortKind);
             }
+            break skt;
+        };
+        Ok(socket)
+    }
+
+    /// Find a wildcard (e.g. port_id == 0) destination port matching the given header.
+    ///
+    /// If more than one port matches the wildcard, an error is returned.
+    fn find_any_local(
+        sockets: &mut List<SocketHeader>,
+        hdr: &Header,
+    ) -> Result<NonNull<SocketHeader>, NetStackSendError> {
+        // Find ONE specific matching port
+        let Some(key) = hdr.key.as_ref() else {
+            return Err(NetStackSendError::AnyPortMissingKey);
+        };
+        let mut iter = sockets.iter_raw();
+        let mut socket: Option<NonNull<SocketHeader>> = None;
+
+        loop {
+            let Some(skt) = iter.next() else {
+                break;
+            };
+            let skt_ref = unsafe { skt.as_ref() };
+            if skt_ref.kind != hdr.kind {
+                continue;
+            }
+            if &skt_ref.key != key {
+                continue;
+            }
+            // It's a match! Is it a second match?
+            if socket.is_some() {
+                return Err(NetStackSendError::AnyPortNotUnique);
+            }
+            // Nope! Store this one, then we keep going to ensure that no
+            // other socket matches this description.
+            socket = Some(skt);
         }
 
-        // We reached the end of sockets.
-        Err(NetStackSendError::NoRoute)
+        socket.ok_or(NetStackSendError::NoRoute)
+    }
+
+    /// Find ALL broadcast (e.g. port_id == 255) sockets matching the given header.
+    ///
+    /// Returns an error if the header does not contain a Key. May return zero
+    /// matches.
+    fn find_all_local(
+        sockets: &mut List<SocketHeader>,
+        hdr: &Header,
+    ) -> Result<impl Iterator<Item = NonNull<SocketHeader>>, NetStackSendError> {
+        let Some(key) = hdr.key.as_ref() else {
+            return Err(NetStackSendError::AllPortMissingKey);
+        };
+        Ok(sockets.iter_raw().filter(move |socket| {
+            let skt_ref = unsafe { socket.as_ref() };
+            let bport = skt_ref.port == 255;
+            let dkind = skt_ref.kind == hdr.kind;
+            let dkey = &skt_ref.key == key;
+            bport && dkind && dkey
+        }))
+    }
+
+    /// Helper method for sending a type to a given socket
+    fn send_ty_to_socket<T: 'static + Serialize + Clone>(
+        this: NonNull<SocketHeader>,
+        t: &T,
+        hdr: &Header,
+        seq_no: &mut u16,
+    ) -> Result<(), NetStackSendError> {
+        let vtable: &'static SocketVTable = {
+            let skt_ref = unsafe { this.as_ref() };
+            skt_ref.vtable
+        };
+
+        if let Some(f) = vtable.send_owned {
+            let this: NonNull<()> = this.cast();
+            let that: NonNull<T> = NonNull::from(t);
+            let that: NonNull<()> = that.cast();
+            let hdr = hdr.to_headerseq_or_with_seq(|| {
+                let seq = *seq_no;
+                *seq_no = seq_no.wrapping_add(1);
+                seq
+            });
+            (f)(this, that, hdr, &TypeId::of::<T>()).map_err(NetStackSendError::SocketSend)
+        } else if let Some(_f) = vtable.send_bor {
+            // TODO: support send borrowed
+            todo!()
+        } else {
+            // todo: keep going? If we found the "right" destination and
+            // sending fails, then there's not much we can do. Probably: there
+            // is no case where a socket has NEITHER send_owned NOR send_bor,
+            // can we make this state impossible instead?
+            Err(NetStackSendError::SocketSend(SocketSendError::WhatTheHell))
+        }
+    }
+
+    /// Helper message for sending a raw message to a given socket
+    fn send_raw_to_socket(
+        this: NonNull<SocketHeader>,
+        body: &[u8],
+        hdr: &Header,
+        seq_no: &mut u16,
+    ) -> Result<(), NetStackSendError> {
+        let vtable: &'static SocketVTable = {
+            let skt_ref = unsafe { this.as_ref() };
+            skt_ref.vtable
+        };
+        let f = vtable.send_raw;
+
+        let this: NonNull<()> = this.cast();
+        let hdr = hdr.to_headerseq_or_with_seq(|| {
+            let seq = *seq_no;
+            *seq_no = seq_no.wrapping_add(1);
+            seq
+        });
+
+        (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
     }
 }
 
@@ -411,6 +577,10 @@ where
             // return check to < instead). NOTE: We currently do NOT guarantee sockets are
             // sorted!
             self.sockets.iter().for_each(|s| {
+                if s.port == 255 {
+                    return;
+                }
+
                 // The upper 3 bits of the port
                 let pupper = s.port & !(32 - 1);
                 // The lower 5 bits of the port
@@ -435,6 +605,7 @@ where
     }
 
     fn free_port(&mut self, port: u8) {
+        debug_assert!(port != 255);
         // The upper 3 bits of the port
         let pupper = port & !(32 - 1);
         // The lower 5 bits of the port
