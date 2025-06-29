@@ -83,7 +83,7 @@
 //! other, rather than just a central "host" computer.
 //!
 //! It's possible this all could have been done on top of TCP/IP, writing my own
-//! TCP/IP stack, or extending the wonderful `smoltcp` crate. I didn't *wan't* to do
+//! TCP/IP stack, or extending the wonderful `smoltcp` crate. I didn't *want* to do
 //! that. We'll see if it pays off.
 //!
 //! ## What IS it, if not `TCP/IP`?
