@@ -107,16 +107,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bbq2"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b5bbde0e5324bc9c282e869a2f544166ac94bbb82b26afd2ca82ac7b0742a89"
-dependencies = [
- "critical-section",
- "maitake-sync",
-]
-
-[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,12 +153,6 @@ name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
-
-[[package]]
-name = "const-fnv1a-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32b13ea120a812beba79e34316b3942a857c86ec1593cb34f27bb28272ce2cca"
 
 [[package]]
 name = "cordyceps"
@@ -223,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "ergot"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cobs 0.3.0",
  "cordyceps",
@@ -241,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "ergot-base"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cobs 0.3.0",
  "cordyceps",
@@ -258,21 +242,12 @@ dependencies = [
 name = "ergot-router"
 version = "0.1.0"
 dependencies = [
- "bbq2",
- "cobs 0.3.0",
- "const-fnv1a-hash",
  "cordyceps",
- "critical-section",
  "env_logger",
  "ergot",
  "log",
- "maitake-sync",
  "mutex",
- "pin-project",
- "postcard",
  "postcard-rpc",
- "postcard-schema",
- "serde",
  "tokio",
 ]
 
