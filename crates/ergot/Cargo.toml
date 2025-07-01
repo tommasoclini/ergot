@@ -1,6 +1,6 @@
 [package]
 name = "ergot"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["James Munns <james@onevariable.com>"]
 edition = "2024"
 readme = "README.md"
@@ -28,4 +28,4 @@ postcard-schema     = { version = "0.2.1",  features = ["derive"] }
 serde               = { version = "1.0",    features = ["derive"] }
 tokio               = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }
 
-ergot-base = { version = "0.3.0", path = "../ergot-base" }
+ergot-base = { version = "0.4.0", path = "../ergot-base" }

@@ -1,7 +1,7 @@
 use ergot::{
     NetStack,
     interface_manager::std_tcp_client::{StdTcpClientIm, register_interface},
-    socket::{endpoint::std_bounded::Server, topic::std_bounded::TopicSocket},
+    socket::{endpoint::std_bounded::Server, topic::std_bounded::Receiver},
     well_known::ErgotPingEndpoint,
 };
 use log::{info, warn};
@@ -63,7 +63,7 @@ async fn yeeter() {
 }
 
 async fn yeet_listener(id: u8) {
-    let subber = TopicSocket::<YeetTopic, _, _>::new(&STACK, 64);
+    let subber = Receiver::<YeetTopic, _, _>::new(&STACK, 64);
     let subber = pin!(subber);
     let mut hdl = subber.subscribe();
 
