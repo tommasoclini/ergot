@@ -1,7 +1,6 @@
-use std::{
+use core::{
     any::TypeId,
     cell::UnsafeCell,
-    collections::VecDeque,
     marker::PhantomData,
     pin::Pin,
     ptr::{NonNull, addr_of},
@@ -16,49 +15,59 @@ use crate::{HeaderSeq, Key, NetStack, ProtocolError, interface_manager::Interfac
 
 use super::{Attributes, OwnedMessage, Response, SocketHeader, SocketSendError, SocketVTable};
 
+#[derive(Debug, PartialEq)]
+pub struct StorageFull;
+
+pub trait Storage<T: 'static>: 'static {
+    fn is_full(&self) -> bool;
+    fn is_empty(&self) -> bool;
+    fn push(&mut self, t: T) -> Result<(), StorageFull>;
+    fn try_pop(&mut self) -> Option<T>;
+}
+
 // Owned Socket
 #[repr(C)]
-pub struct StdBoundedSocket<T, R, M>
+pub struct Socket<S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
     // LOAD BEARING: must be first
     hdr: SocketHeader,
-    net: &'static NetStack<R, M>,
+    pub(crate) net: &'static NetStack<R, M>,
     // TODO: just a single item, we probably want a more ring-buffery
     // option for this.
-    inner: UnsafeCell<BoundedQueue<T>>,
+    inner: UnsafeCell<StoreBox<S, Response<T>>>,
 }
 
-pub struct StdBoundedSocketHdl<'a, T, R, M>
+pub struct SocketHdl<'a, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub(crate) ptr: NonNull<StdBoundedSocket<T, R, M>>,
-    _lt: PhantomData<Pin<&'a mut StdBoundedSocket<T, R, M>>>,
+    pub(crate) ptr: NonNull<Socket<S, T, R, M>>,
+    _lt: PhantomData<Pin<&'a mut Socket<S, T, R, M>>>,
     port: u8,
 }
 
-pub struct Recv<'a, 'b, T, R, M>
+pub struct Recv<'a, 'b, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    hdl: &'a mut StdBoundedSocketHdl<'b, T, R, M>,
+    hdl: &'a mut SocketHdl<'b, S, T, R, M>,
 }
 
-struct BoundedQueue<T: 'static> {
+struct StoreBox<S: Storage<T>, T: 'static> {
     wait: Option<Waker>,
-    // TODO: We could probably do better than a VecDeque with a boxed slice
-    // and a ringbuffer, which could maybe also be shared with the std
-    // inline buffer, but for now this is fine.
-    queue: VecDeque<Response<T>>,
-    max_len: usize,
+    sto: S,
+    _pd: PhantomData<fn() -> T>,
 }
 
 // ---- impls ----
@@ -67,15 +76,16 @@ struct BoundedQueue<T: 'static> {
 
 // ...
 
-// impl StdBoundedSocket
+// impl OwnedSocket
 
-impl<T, R, M> StdBoundedSocket<T, R, M>
+impl<S, T, R, M> Socket<S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
-    pub fn new(net: &'static NetStack<R, M>, key: Key, attrs: Attributes, bound: usize) -> Self {
+    pub const fn new(net: &'static NetStack<R, M>, key: Key, attrs: Attributes, sto: S) -> Self {
         Self {
             hdr: SocketHeader {
                 links: Links::new(),
@@ -84,33 +94,29 @@ where
                 attrs,
                 key,
             },
-            inner: UnsafeCell::new(BoundedQueue::new(bound)),
+            inner: UnsafeCell::new(StoreBox::new(sto)),
             net,
         }
     }
 
-    pub fn stack(&self) -> &'static NetStack<R, M> {
-        self.net
-    }
-
-    pub fn attach<'a>(self: Pin<&'a mut Self>) -> StdBoundedSocketHdl<'a, T, R, M> {
+    pub fn attach<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, R, M> {
         let stack = self.net;
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
-        StdBoundedSocketHdl {
+        SocketHdl {
             ptr: ptr_self,
             _lt: PhantomData,
             port,
         }
     }
 
-    pub fn attach_broadcast<'a>(self: Pin<&'a mut Self>) -> StdBoundedSocketHdl<'a, T, R, M> {
+    pub fn attach_broadcast<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, R, M> {
         let stack = self.net;
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         unsafe { stack.attach_broadcast_socket(ptr_erase) };
-        StdBoundedSocketHdl {
+        SocketHdl {
             ptr: ptr_self,
             _lt: PhantomData,
             port: 255,
@@ -129,18 +135,20 @@ where
         }
     }
 
+    pub fn stack(&self) -> &'static NetStack<R, M> {
+        self.net
+    }
+
     fn recv_err(this: NonNull<()>, hdr: HeaderSeq, err: ProtocolError) {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut BoundedQueue<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut StoreBox<S, Response<T>> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.queue.len() >= mutitem.max_len {
-            return;
-        }
-
-        mutitem.queue.push_back(Err(OwnedMessage { hdr, t: err }));
-        if let Some(w) = mutitem.wait.take() {
-            w.wake();
+        let msg = Err(OwnedMessage { hdr, t: err });
+        if mutitem.sto.push(msg).is_ok() {
+            if let Some(w) = mutitem.wait.take() {
+                w.wake();
+            }
         }
     }
 
@@ -158,21 +166,22 @@ where
         let that: &T = unsafe { that.as_ref() };
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut BoundedQueue<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut StoreBox<S, Response<T>> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.queue.len() >= mutitem.max_len {
-            return Err(SocketSendError::NoSpace);
-        }
-
-        mutitem.queue.push_back(Ok(OwnedMessage {
+        let msg = Ok(OwnedMessage {
             hdr,
             t: that.clone(),
-        }));
-        if let Some(w) = mutitem.wait.take() {
-            w.wake();
-        }
+        });
 
-        Ok(())
+        match mutitem.sto.push(msg) {
+            Ok(()) => {
+                if let Some(w) = mutitem.wait.take() {
+                    w.wake();
+                }
+                Ok(())
+            }
+            Err(StorageFull) => Err(SocketSendError::NoSpace),
+        }
     }
 
     // fn send_bor(
@@ -188,14 +197,15 @@ where
     fn recv_raw(this: NonNull<()>, that: &[u8], hdr: HeaderSeq) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let mutitem: &mut BoundedQueue<T> = unsafe { &mut *this.inner.get() };
+        let mutitem: &mut StoreBox<S, Response<T>> = unsafe { &mut *this.inner.get() };
 
-        if mutitem.queue.len() >= mutitem.max_len {
+        if mutitem.sto.is_full() {
             return Err(SocketSendError::NoSpace);
         }
 
         if let Ok(t) = postcard::from_bytes::<T>(that) {
-            mutitem.queue.push_back(Ok(OwnedMessage { hdr, t }));
+            let msg = Ok(OwnedMessage { hdr, t });
+            let _ = mutitem.sto.push(msg);
             if let Some(w) = mutitem.wait.take() {
                 w.wake();
             }
@@ -206,11 +216,12 @@ where
     }
 }
 
-// impl StdBoundedSocketHdl
+// impl OwnedSocketHdl
 
 // TODO: impl drop, remove waker, remove socket
-impl<'a, T, R, M> StdBoundedSocketHdl<'a, T, R, M>
+impl<'a, S, T, R, M> SocketHdl<'a, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
@@ -224,21 +235,22 @@ where
     }
 
     // TODO: This future is !Send? I don't fully understand why, but rustc complains
-    // that since `NonNull<StdBoundedSocket<E>>` is !Sync, then this future can't be Send,
-    // BUT impl'ing Sync unsafely on StdBoundedSocketHdl + StdBoundedSocket doesn't seem to help.
-    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, T, R, M> {
+    // that since `NonNull<OwnedSocket<E>>` is !Sync, then this future can't be Send,
+    // BUT impl'ing Sync unsafely on OwnedSocketHdl + OwnedSocket doesn't seem to help.
+    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, S, T, R, M> {
         Recv { hdl: self }
     }
 }
 
-impl<T, R, M> Drop for StdBoundedSocket<T, R, M>
+impl<S, T, R, M> Drop for Socket<S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
 {
     fn drop(&mut self) {
-        println!("Dropping StdBoundedSocket!");
+        println!("Dropping OwnedSocket!");
         unsafe {
             let this = NonNull::from(&self.hdr);
             self.net.detach_socket(this);
@@ -246,8 +258,9 @@ where
     }
 }
 
-unsafe impl<T, R, M> Send for StdBoundedSocketHdl<'_, T, R, M>
+unsafe impl<S, T, R, M> Send for SocketHdl<'_, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Send,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
@@ -255,8 +268,9 @@ where
 {
 }
 
-unsafe impl<T, R, M> Sync for StdBoundedSocketHdl<'_, T, R, M>
+unsafe impl<S, T, R, M> Sync for SocketHdl<'_, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Send,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
@@ -266,8 +280,9 @@ where
 
 // impl Recv
 
-impl<T, R, M> Future for Recv<'_, '_, T, R, M>
+impl<S, T, R, M> Future for Recv<'_, '_, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
     M: InterfaceManager + 'static,
@@ -275,24 +290,25 @@ where
     type Output = Response<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let net = self.hdl.stack();
+        let net: &'static NetStack<R, M> = self.hdl.stack();
         let f = || {
-            let this_ref: &StdBoundedSocket<T, R, M> = unsafe { self.hdl.ptr.as_ref() };
-            let box_ref: &mut BoundedQueue<T> = unsafe { &mut *this_ref.inner.get() };
-            if let Some(t) = box_ref.queue.pop_front() {
-                Some(t)
-            } else {
-                let new_wake = cx.waker();
-                if let Some(w) = box_ref.wait.take() {
-                    if !w.will_wake(new_wake) {
-                        w.wake();
-                    }
-                }
-                // NOTE: Okay to register waker AFTER checking, because we
-                // have an exclusive lock
-                box_ref.wait = Some(new_wake.clone());
-                None
+            let this_ref: &Socket<S, T, R, M> = unsafe { self.hdl.ptr.as_ref() };
+            let box_ref: &mut StoreBox<S, Response<T>> = unsafe { &mut *this_ref.inner.get() };
+
+            if let Some(resp) = box_ref.sto.try_pop() {
+                return Some(resp);
             }
+
+            let new_wake = cx.waker();
+            if let Some(w) = box_ref.wait.take() {
+                if !w.will_wake(new_wake) {
+                    w.wake();
+                }
+            }
+            // NOTE: Okay to register waker AFTER checking, because we
+            // have an exclusive lock
+            box_ref.wait = Some(new_wake.clone());
+            None
         };
         let res = unsafe { net.with_lock(f) };
         if let Some(t) = res {
@@ -303,8 +319,9 @@ where
     }
 }
 
-unsafe impl<T, R, M> Sync for Recv<'_, '_, T, R, M>
+unsafe impl<S, T, R, M> Sync for Recv<'_, '_, S, T, R, M>
 where
+    S: Storage<Response<T>>,
     T: Send,
     T: Serialize + Clone + DeserializeOwned + 'static,
     R: ScopedRawMutex + 'static,
@@ -312,14 +329,14 @@ where
 {
 }
 
-// impl BoundedQueue
+// impl OneBox
 
-impl<T: 'static> BoundedQueue<T> {
-    fn new(bound: usize) -> Self {
+impl<S: Storage<T>, T: 'static> StoreBox<S, T> {
+    const fn new(sto: S) -> Self {
         Self {
             wait: None,
-            queue: VecDeque::new(),
-            max_len: bound,
+            sto,
+            _pd: PhantomData,
         }
     }
 }
