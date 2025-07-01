@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "ergot"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cobs 0.3.0",
  "cordyceps",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "ergot-base"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cobs 0.3.0",
  "cordyceps",
