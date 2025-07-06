@@ -1,0 +1,31 @@
+name: Build and Test no-std Demos
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  demos-nostd:
+    name: "Build all no-std demos"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install embedded target
+        # Note: once https://github.com/hawkw/mycelium/pull/538 lands we can test on
+        # thumbv6m-none-eabi
+        run: rustup target add thumbv7em-none-eabi
+      #
+      # nRF52840 Null-Interface
+      #
+      - name: Check ergot (no features, on host)
+        working-directory: ./demos/nrf52840-null
+        run: cargo build
+      #
+      # nRF52840 Embassy-USB-Interface
+      #
+      - name: Check ergot (no features, on host)
+        working-directory: ./demos/nrf52840-eusb
+        run: cargo build
