@@ -42,6 +42,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bbq2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0f53f69bb950c7d67f3b97c6ce7f062e1e1f04dafc9271816efc33d0fd1997"
+dependencies = [
+ "maitake-sync",
+]
+
+[[package]]
 name = "bitfield"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -455,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "ergot"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cobs",
  "cordyceps",
@@ -472,8 +481,9 @@ dependencies = [
 
 [[package]]
 name = "ergot-base"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
+ "bbq2",
  "cobs",
  "cordyceps",
  "critical-section",
