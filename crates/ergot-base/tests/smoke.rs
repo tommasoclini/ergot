@@ -1,11 +1,19 @@
 use std::{pin::pin, time::Duration};
 
+use bbq2::{
+    queue::BBQueue,
+    traits::{coordination::cas::AtomicCoord, notifier::maitake::MaiNotSpsc, storage::Inline},
+};
 use ergot_base::{
     Address, DEFAULT_TTL, FrameKind, Header, Key, NetStack, ProtocolError,
-    interface_manager::null::NullInterfaceManager,
-    socket::{Attributes, single::Socket},
+    interface_manager::{
+        null::NullInterfaceManager,
+        wire_frames::{CommonHeader, encode_frame_ty},
+    },
+    socket::{Attributes, owned::single::Socket},
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
+use postcard::ser_flavors;
 use serde::{Deserialize, Serialize};
 use tokio::{spawn, time::sleep};
 
@@ -85,16 +93,31 @@ async fn hello() {
             // hold more than one message at a time)
             sleep(Duration::from_millis(100)).await;
             let body = postcard::to_stdvec(&Example { a: 56, b: 1234 }).unwrap();
+            let mut buf = [0u8; 128];
+            let hdr = encode_frame_ty::<_, ()>(
+                ser_flavors::Slice::new(&mut buf),
+                &CommonHeader {
+                    src: src.as_u32(),
+                    dst: dst.as_u32(),
+                    seq_no: 123,
+                    kind: FrameKind::ENDPOINT_REQ.0,
+                    ttl: DEFAULT_TTL,
+                },
+                Some(&Key(*b"TEST1234")),
+                &(),
+            )
+            .unwrap();
             STACK
                 .send_raw(
                     &Header {
                         src,
                         dst,
                         key: Some(Key(*b"TEST1234")),
-                        seq_no: None,
+                        seq_no: Some(123),
                         kind: FrameKind::ENDPOINT_REQ,
                         ttl: DEFAULT_TTL,
                     },
+                    hdr,
                     &body,
                 )
                 .unwrap();
@@ -233,6 +256,85 @@ async fn hello_err() {
         msg.hdr.dst
     );
     assert_eq!(ProtocolError::NSSE_NO_ROUTE, msg.t);
+
+    tsk.await.unwrap();
+}
+
+#[tokio::test]
+async fn hello_borrowed() {
+    static STACK: TestNetStack = NetStack::new();
+    let src = Address {
+        network_id: 0,
+        node_id: 0,
+        port_id: 123,
+    };
+
+    #[derive(Serialize, Deserialize, Clone)]
+    struct Example<'a> {
+        lol: &'a str,
+    }
+
+    use ergot_base::socket::borrow as brw;
+
+    static QBUF: BBQueue<Inline<1024>, AtomicCoord, MaiNotSpsc> = BBQueue::new();
+
+    let socket = brw::Socket::<&BBQueue<_, _, _>, &str, _, _>::new(
+        &STACK,
+        Key(*b"TEST1234"),
+        Attributes {
+            kind: FrameKind::ENDPOINT_REQ,
+            discoverable: true,
+        },
+        &QBUF,
+        256,
+    );
+    let mut socket = pin!(socket);
+    let mut hdl = socket.as_mut().attach();
+    let port = hdl.port();
+
+    let tsk = spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        let s: &str = "hello, world!";
+
+        // Send an error
+        STACK
+            .send_ty::<&str>(
+                &Header {
+                    src,
+                    dst: Address {
+                        network_id: 0,
+                        node_id: 0,
+                        port_id: port,
+                    },
+                    key: None,
+                    seq_no: None,
+                    kind: FrameKind::ENDPOINT_REQ,
+                    ttl: 1,
+                },
+                &s,
+            )
+            .unwrap();
+    });
+
+    let msg = hdl.recv().await;
+    let msgdeser = msg.try_access().unwrap();
+    assert_eq!(
+        Address {
+            network_id: 0,
+            node_id: 0,
+            port_id: 123
+        },
+        msg.hdr.src
+    );
+    assert_eq!(
+        Address {
+            network_id: 0,
+            node_id: 0,
+            port_id: port,
+        },
+        msg.hdr.dst
+    );
+    assert_eq!("hello, world!", msgdeser.unwrap().t);
 
     tsk.await.unwrap();
 }

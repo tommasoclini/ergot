@@ -149,8 +149,14 @@ where
     /// This interface should almost never be used by end-users, and is instead
     /// typically used by interfaces to feed received messages into the
     /// [`NetStack`].
-    pub fn send_raw(&'static self, hdr: &Header, body: &[u8]) -> Result<(), NetStackSendError> {
-        self.inner.with_lock(|inner| inner.send_raw(hdr, body))
+    pub fn send_raw(
+        &'static self,
+        hdr: &Header,
+        hdr_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), NetStackSendError> {
+        self.inner
+            .with_lock(|inner| inner.send_raw(hdr, hdr_raw, body))
     }
 
     /// Send a typed message
@@ -384,7 +390,12 @@ where
     }
 
     /// Handle sending of a raw (serialized) message
-    fn send_raw(&mut self, hdr: &Header, body: &[u8]) -> Result<(), NetStackSendError> {
+    fn send_raw(
+        &mut self,
+        hdr: &Header,
+        hdr_raw: &[u8],
+        body: &[u8],
+    ) -> Result<(), NetStackSendError> {
         let Self {
             sockets,
             seq_no,
@@ -402,15 +413,15 @@ where
             Self::broadcast(
                 sockets,
                 hdr,
-                |skt| Self::send_raw_to_socket(skt, body, hdr, seq_no).is_ok(),
-                || manager.send_raw(hdr, body).is_ok(),
+                |skt| Self::send_raw_to_socket(skt, body, hdr, hdr_raw, seq_no).is_ok(),
+                || manager.send_raw(hdr, hdr_raw, body).is_ok(),
             )
         } else {
             Self::unicast(
                 sockets,
                 hdr,
-                |skt| Self::send_raw_to_socket(skt, body, hdr, seq_no),
-                || manager.send_raw(hdr, body),
+                |skt| Self::send_raw_to_socket(skt, body, hdr, hdr_raw, seq_no),
+                || manager.send_raw(hdr, hdr_raw, body),
             )
         }
     }
@@ -676,6 +687,7 @@ where
         this: NonNull<SocketHeader>,
         body: &[u8],
         hdr: &Header,
+        hdr_raw: &[u8],
         seq_no: &mut u16,
     ) -> Result<(), NetStackSendError> {
         let vtable: &'static SocketVTable = {
@@ -691,7 +703,7 @@ where
             seq
         });
 
-        (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
+        (f)(this, body, hdr, hdr_raw).map_err(NetStackSendError::SocketSend)
     }
 }
 
@@ -810,7 +822,7 @@ mod test {
     use crate::{
         FrameKind, Key, NetStack,
         interface_manager::null::NullInterfaceManager,
-        socket::{Attributes, single::Socket},
+        socket::{Attributes, owned::single::Socket},
     };
 
     #[test]
