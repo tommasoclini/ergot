@@ -1,6 +1,6 @@
 [package]
 name = "ergot"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["James Munns <james@onevariable.com>"]
 edition = "2024"
 readme = "README.md"
@@ -44,7 +44,7 @@ nusb-v0_1 = [
 ]
 
 [dependencies]
-ergot-base = { version = "0.5.0", path = "../ergot-base" }
+ergot-base = { version = "0.6.0", path = "../ergot-base" }
 
 critical-section    = "1.2.0"
 pin-project         = "1.1.10"
