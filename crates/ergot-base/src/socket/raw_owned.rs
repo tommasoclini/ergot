@@ -18,12 +18,9 @@ use core::{
 };
 
 use cordyceps::list::Links;
-use mutex::ScopedRawMutex;
 use serde::de::DeserializeOwned;
 
-use crate::{
-    HeaderSeq, Key, NetStack, ProtocolError, interface_manager::InterfaceManager, nash::NameHash,
-};
+use crate::{HeaderSeq, Key, ProtocolError, nash::NameHash, net_stack::NetStackHandle};
 
 use super::{Attributes, HeaderMessage, Response, SocketHeader, SocketSendError, SocketVTable};
 
@@ -39,39 +36,36 @@ pub trait Storage<T: 'static>: 'static {
 
 // Socket
 #[repr(C)]
-pub struct Socket<S, T, R, M>
+pub struct Socket<S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
     // LOAD BEARING: must be first
     hdr: SocketHeader,
-    pub(crate) net: &'static NetStack<R, M>,
+    pub(crate) net: N::Target,
     inner: UnsafeCell<StoreBox<S, Response<T>>>,
 }
 
-pub struct SocketHdl<'a, S, T, R, M>
+pub struct SocketHdl<'a, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
-    pub(crate) ptr: NonNull<Socket<S, T, R, M>>,
-    _lt: PhantomData<Pin<&'a mut Socket<S, T, R, M>>>,
+    pub(crate) ptr: NonNull<Socket<S, T, N>>,
+    _lt: PhantomData<Pin<&'a mut Socket<S, T, N>>>,
     port: u8,
 }
 
-pub struct Recv<'a, 'b, S, T, R, M>
+pub struct Recv<'a, 'b, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
-    hdl: &'a mut SocketHdl<'b, S, T, R, M>,
+    hdl: &'a mut SocketHdl<'b, S, T, N>,
 }
 
 struct StoreBox<S: Storage<T>, T: 'static> {
@@ -84,15 +78,14 @@ struct StoreBox<S: Storage<T>, T: 'static> {
 
 // impl Socket
 
-impl<S, T, R, M> Socket<S, T, R, M>
+impl<S, T, N> Socket<S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
     pub const fn new(
-        net: &'static NetStack<R, M>,
+        net: N::Target,
         key: Key,
         attrs: Attributes,
         sto: S,
@@ -116,8 +109,8 @@ where
         }
     }
 
-    pub fn attach<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, R, M> {
-        let stack = self.net;
+    pub fn attach<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, N> {
+        let stack = self.net.clone();
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
@@ -128,8 +121,8 @@ where
         }
     }
 
-    pub fn attach_broadcast<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, R, M> {
-        let stack = self.net;
+    pub fn attach_broadcast<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, N> {
+        let stack = self.net.clone();
         let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         unsafe { stack.attach_broadcast_socket(ptr_erase) };
@@ -152,8 +145,8 @@ where
         }
     }
 
-    pub fn stack(&self) -> &'static NetStack<R, M> {
-        self.net
+    pub fn stack(&self) -> N::Target {
+        self.net.clone()
     }
 
     fn recv_err(this: NonNull<()>, hdr: HeaderSeq, err: ProtocolError) {
@@ -230,32 +223,30 @@ where
 
 // impl SocketHdl
 
-impl<'a, S, T, R, M> SocketHdl<'a, S, T, R, M>
+impl<'a, S, T, N> SocketHdl<'a, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
     pub fn port(&self) -> u8 {
         self.port
     }
 
-    pub fn stack(&self) -> &'static NetStack<R, M> {
-        unsafe { *addr_of!((*self.ptr.as_ptr()).net) }
+    pub fn stack(&self) -> N::Target {
+        unsafe { (*addr_of!((*self.ptr.as_ptr()).net)).clone() }
     }
 
-    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, S, T, R, M> {
+    pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, S, T, N> {
         Recv { hdl: self }
     }
 }
 
-impl<S, T, R, M> Drop for Socket<S, T, R, M>
+impl<S, T, N> Drop for Socket<S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
     fn drop(&mut self) {
         unsafe {
@@ -265,41 +256,38 @@ where
     }
 }
 
-unsafe impl<S, T, R, M> Send for SocketHdl<'_, S, T, R, M>
+unsafe impl<S, T, N> Send for SocketHdl<'_, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Send,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
 }
 
-unsafe impl<S, T, R, M> Sync for SocketHdl<'_, S, T, R, M>
+unsafe impl<S, T, N> Sync for SocketHdl<'_, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Send,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
 }
 
 // impl Recv
 
-impl<S, T, R, M> Future for Recv<'_, '_, S, T, R, M>
+impl<S, T, N> Future for Recv<'_, '_, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
     type Output = Response<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let net: &'static NetStack<R, M> = self.hdl.stack();
+        let net: N::Target = self.hdl.stack();
         let f = || {
-            let this_ref: &Socket<S, T, R, M> = unsafe { self.hdl.ptr.as_ref() };
+            let this_ref: &Socket<S, T, N> = unsafe { self.hdl.ptr.as_ref() };
             let box_ref: &mut StoreBox<S, Response<T>> = unsafe { &mut *this_ref.inner.get() };
 
             if let Some(resp) = box_ref.sto.try_pop() {
@@ -326,13 +314,12 @@ where
     }
 }
 
-unsafe impl<S, T, R, M> Sync for Recv<'_, '_, S, T, R, M>
+unsafe impl<S, T, N> Sync for Recv<'_, '_, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Send,
     T: Clone + DeserializeOwned + 'static,
-    R: ScopedRawMutex + 'static,
-    M: InterfaceManager + 'static,
+    N: NetStackHandle,
 {
 }
 

@@ -31,7 +31,9 @@ use crate::{
     traits::{Endpoint, Topic},
 };
 
-use ergot_base::{self as base, AnyAllAppendix, ProtocolError, nash::NameHash};
+use ergot_base::{
+    self as base, AnyAllAppendix, ProtocolError, nash::NameHash, net_stack::NetStackHandle,
+};
 
 /// The `NetStack`
 ///
@@ -74,11 +76,29 @@ pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
 
 #[derive(Debug, PartialEq)]
 pub enum ReqRespError {
+    // An error occurred locally while sending
     Local(NetStackSendError),
+    // An error occurred remotely while waiting for response
     Remote(ProtocolError),
+    // Requests cannot be sent to broadcast ports
+    NoBroadcast,
 }
 
 // ---- impl NetStack ----
+
+impl<'a, R, M> NetStackHandle for &'a NetStack<R, M>
+where
+    R: ScopedRawMutex,
+    M: InterfaceManager,
+{
+    type Target = &'a base::net_stack::NetStack<R, M>;
+    type Mutex = R;
+    type Interface = M;
+
+    fn stack(&self) -> Self::Target {
+        &self.inner
+    }
+}
 
 impl<R, M> NetStack<R, M>
 where
@@ -178,7 +198,7 @@ where
     ///     // (not shown: starting an `Example` service...)
     ///     # let jhdl = tokio::task::spawn(async {
     ///     #     println!("Serve!");
-    ///     #     let srv = Server::<Example, _, _>::new(&STACK, 16, None);
+    ///     #     let srv = STACK.std_bounded_endpoint_server::<Example>(16, None);
     ///     #     let srv = core::pin::pin!(srv);
     ///     #     let mut hdl = srv.attach();
     ///     #     hdl.serve(async |p| *p as i32).await.unwrap();
@@ -209,9 +229,26 @@ where
         E::Response: Serialize + Clone + DeserializeOwned + 'static,
     {
         // Response doesn't need a name because we will reply back.
-        let resp_sock = crate::socket::endpoint::single::Client::<E, R, M>::new(self, None);
+        //
+        // We can also use a "single"/oneshot response because we know
+        // this request will get exactly one response.
+        let resp_sock = self.stack_single_endpoint_client::<E>();
         let resp_sock = pin!(resp_sock);
         let mut resp_hdl = resp_sock.attach();
+
+        // If the destination is wildcard, include the any_all appendix to the
+        // header
+        let any_all = match dst.port_id {
+            0 => Some(AnyAllAppendix {
+                key: base::Key(E::REQ_KEY.to_bytes()),
+                nash: name.map(NameHash::new),
+            }),
+            255 => {
+                return Err(ReqRespError::NoBroadcast);
+            }
+            _ => None,
+        };
+
         let hdr = Header {
             src: Address {
                 network_id: 0,
@@ -219,10 +256,7 @@ where
                 port_id: resp_hdl.port(),
             },
             dst,
-            any_all: Some(AnyAllAppendix {
-                key: base::Key(E::REQ_KEY.to_bytes()),
-                nash: name.map(NameHash::new),
-            }),
+            any_all,
             seq_no: None,
             kind: FrameKind::ENDPOINT_REQ,
             ttl: base::DEFAULT_TTL,
@@ -301,6 +335,86 @@ where
         t: &T,
     ) -> Result<(), NetStackSendError> {
         self.inner.send_ty(hdr, t)
+    }
+
+    pub fn stack_single_endpoint_client<E: Endpoint>(
+        &self,
+    ) -> crate::socket::endpoint::single::Client<E, &'_ Self>
+    where
+        E::Request: Serialize + DeserializeOwned + Clone,
+        E::Response: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::endpoint::single::Client::new(self, None)
+    }
+
+    pub fn stack_single_endpoint_server<E: Endpoint>(
+        &self,
+        name: Option<&str>,
+    ) -> crate::socket::endpoint::single::Server<E, &'_ Self>
+    where
+        E::Request: Serialize + DeserializeOwned + Clone,
+        E::Response: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::endpoint::single::Server::new(self, name)
+    }
+
+    pub fn stack_bounded_endpoint_server<E: Endpoint, const N: usize>(
+        &self,
+        name: Option<&str>,
+    ) -> crate::socket::endpoint::stack_vec::Server<E, &'_ Self, N>
+    where
+        E::Request: Serialize + DeserializeOwned + Clone,
+        E::Response: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::endpoint::stack_vec::Server::new(self, name)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn std_bounded_endpoint_server<E: Endpoint>(
+        &self,
+        bound: usize,
+        name: Option<&str>,
+    ) -> crate::socket::endpoint::std_bounded::Server<E, &'_ Self>
+    where
+        E::Request: Serialize + DeserializeOwned + Clone,
+        E::Response: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::endpoint::std_bounded::Server::new(self, bound, name)
+    }
+
+    pub fn stack_single_topic_receiver<T>(
+        &self,
+        name: Option<&str>,
+    ) -> crate::socket::topic::single::Receiver<T, &'_ Self>
+    where
+        T: Topic,
+        T::Message: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::topic::single::Receiver::new(self, name)
+    }
+
+    pub fn stack_bounded_topic_receiver<T, const N: usize>(
+        &self,
+        name: Option<&str>,
+    ) -> crate::socket::topic::stack_vec::Receiver<T, &'_ Self, N>
+    where
+        T: Topic,
+        T::Message: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::topic::stack_vec::Receiver::new(self, name)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn std_bounded_topic_receiver<T>(
+        &self,
+        bound: usize,
+        name: Option<&str>,
+    ) -> crate::socket::topic::std_bounded::Receiver<T, &'_ Self>
+    where
+        T: Topic,
+        T::Message: Serialize + DeserializeOwned + Clone,
+    {
+        crate::socket::topic::std_bounded::Receiver::new(self, bound, name)
     }
 }
 
