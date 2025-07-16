@@ -623,7 +623,7 @@ checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
 
 [[package]]
 name = "ergot"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cobs 0.3.0",
  "cordyceps 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "ergot-base"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bbq2",
  "cobs 0.3.0",
