@@ -1,8 +1,8 @@
 //! # `ergot` - An Introduction
 //!
-//! `ergot` is a network stack written in Rust. It is currently experimental.
+//! `ergot` is a messaging library written in Rust. It is currently experimental.
 //!
-//! ## What do you mean, "Network Stack"?
+//! ## What do you mean, "Messaging Library"?
 //!
 //! `ergot` is an evolution in the `postcard` family.
 //!
@@ -17,28 +17,27 @@
 //! However: it has no prescription of HOW to connect two devices, or how a server
 //! could manage connections with more than one client at a time.
 //!
-//! `ergot` is a **network stack**. It handles concerns such as routing, addressing,
+//! `ergot` is a **messaging library**. It handles concerns such as routing, addressing,
 //! and socket-oriented connections between many devices. It uses `postcard` for
 //! the encoding of user data, and currently offers protocol functionality inspired
 //! by `postcard-rpc`. It allows devices of various sizes to become part of a
 //! network, and for all nodes to communicate with each other.
 //!
-//! As a network stack: It should help you to communicate *across* systems, whether
+//! As a messaging library: It should help you to communicate *across* systems, whether
 //! that is between tasks within the same program, between devices that are directly
 //! connected to each other, or between devices separated by multiple network links.
 //!
-//! ## Why `ergot`, and not `TCP/IP`?
+//! ## Why `ergot`?
 //!
-//! `ergot` is **NOT** a TCP/IP stack. The decision to build a custom network stack
-//! rather than a new version or layer on top of existing tech was made to support
-//! four main goals:
+//! The decision to build a custom messaging library rather than a layer on top of
+//! existing tech was made to support four main goals:
 //!
 //! ### Communication for devices of ANY size
 //!
 //! First, **the ability to support devices with different levels of capabilities**,
 //! ranging from the smallest Cortex-M0+ devices, all the way up to desktop devices.
 //!
-//! `ergot` achieves this by making many capabilities of the network stack optional
+//! `ergot` achieves this by making many capabilities of the messaging library optional
 //! and swappable. Smaller devices can be part of a network, without having to
 //! manage things like routing tables or large network buffers. Instead, they can
 //! rely on larger devices they are connected to, to manage heavier networking
@@ -86,9 +85,7 @@
 //! TCP/IP stack, or extending the wonderful `smoltcp` crate. I didn't *want* to do
 //! that. We'll see if it pays off.
 //!
-//! ## What IS it, if not `TCP/IP`?
-//!
-//! Well, it's not THAT far from modern communication stacks based on TCP/IP.
+//! ## Inspiration
 //!
 //! `ergot` is strongly influenced by [AppleTalk], a networking stack used by
 //! computers in the late 80's and early 90's. It is an interesting place to pull
@@ -97,10 +94,5 @@
 //! same design choices work today?
 //!
 //! [AppleTalk]: https://en.wikipedia.org/wiki/AppleTalk
-//!
-//! It likely is possible to describe `ergot` concepts in terms of the [OSI Model],
-//! but I'm not too stressed about it.
-//!
-//! [OSI Model]: https://en.wikipedia.org/wiki/OSI_model
 
 pub mod _01_what_can_you_do;
