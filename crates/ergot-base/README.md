@@ -1,16 +1,12 @@
 # `ergot-base`
 
-*The latest in unsafe network stacks.*
-
-## Purpose
-
-Ergot is a network stack that can run on a variety of differently sized devices, from large desktop/server PCs down to very small single core microcontrollers.
+**Ergot is a messaging library that can run on a variety of differently sized devices, from large desktop/server PCs down to very small single core microcontrollers.**
 
 Ergot allows developers to enjoy a coherent network of devices, regardless of the size of devices, or transport mediums used to connect them.
 
-It includes type-safe sockets, addressing, and routing. In minimal MCU-sized configurations, it requires no allocator, and is `no_std` friendly. In larger PC-sized configurations, allocations may be used for performance and convenience.
+It includes **type-safe sockets**, **addressing**, and **routing**. In minimal MCU-sized configurations, it requires no allocator, and is `no_std` friendly. In larger PC-sized configurations, allocations may be used for performance and convenience.
 
-Ergot has grown out of the lessons of the `postcard` and `postcard-rpc` projects, and aims to (eventually) supercede `postcard-rpc` in functionality. From a networking perspective, it is heavily inspired by [AppleTalk](https://en.wikipedia.org/wiki/AppleTalk), an OSI-model networking stack used on Mac computers in the late 80s and early 90s.
+Ergot has grown out of the lessons of the `postcard` and `postcard-rpc` projects, and aims to (eventually) supercede `postcard-rpc` in functionality, with further inspiration from [AppleTalk](https://en.wikipedia.org/wiki/AppleTalk), an OSI-model protocol stack used on Mac computers in the late 80s and early 90s.
 
 Ergot is still very early in development. Bugs are expected. Help is welcome.
 
@@ -18,8 +14,8 @@ Ergot is still very early in development. Bugs are expected. Help is welcome.
 
 Ergot is split into two parts:
 
-* `ergot-base` is the core of networking functionality, but is not intended to be used directly by end users
-* `ergot` extends `ergot-base`, and currently uses a `postcard-rpc` influenced set of capabilities
+* `ergot-base` is the core of messaging functionality, but is not intended to be used directly by end users
+* `ergot` extends `ergot-base`, and currently provides a `postcard-rpc`-influenced set of capabilities
 
 Most users should use `ergot` and not `ergot-base`. The split is to keep `ergot-base` stable as I iterate on the behavior of sockets in `ergot`.
 
