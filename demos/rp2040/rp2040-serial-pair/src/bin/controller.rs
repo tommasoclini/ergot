@@ -87,11 +87,18 @@ async fn pinger() {
     let mut ctr = 0u32;
     loop {
         ticker.next().await;
-        let res = STACK.req_resp::<ErgotPingEndpoint>(
-            Address { network_id: 1, node_id: 2, port_id: 0 },
-            &ctr,
-            None,
-        ).with_timeout(Duration::from_millis(100)).await;
+        let res = STACK
+            .req_resp::<ErgotPingEndpoint>(
+                Address {
+                    network_id: 1,
+                    node_id: 2,
+                    port_id: 0,
+                },
+                &ctr,
+                None,
+            )
+            .with_timeout(Duration::from_millis(100))
+            .await;
         match res {
             Ok(Ok(n)) => {
                 defmt::info!("Got ping {=u32} -> {=u32}", ctr, n);
@@ -104,7 +111,6 @@ async fn pinger() {
                 defmt::warn!("Ping timeout");
             }
         }
-
     }
 }
 

@@ -10,7 +10,12 @@ use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use tokio::time::sleep;
 use tokio::time::{interval, timeout};
 
-use std::{collections::{HashMap, HashSet}, io, pin::pin, time::{Duration, Instant}};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    pin::pin,
+    time::{Duration, Instant},
+};
 
 const MTU: u16 = 1024;
 const OUT_BUFFER_SIZE: usize = 4096;
@@ -64,17 +69,21 @@ async fn ping_all() {
             ctr = ctr.wrapping_add(1);
 
             let addr = if let Some(port) = portmap.get(&net) {
-                Address { network_id: net, node_id: 2, port_id: *port }
+                Address {
+                    network_id: net,
+                    node_id: 2,
+                    port_id: *port,
+                }
             } else {
-                Address { network_id: net, node_id: 2, port_id: 0 }
+                Address {
+                    network_id: net,
+                    node_id: 2,
+                    port_id: 0,
+                }
             };
 
             let start = Instant::now();
-            let rr = STACK.req_resp_full::<ErgotPingEndpoint>(
-                addr,
-                &pg,
-                None,
-            );
+            let rr = STACK.req_resp_full::<ErgotPingEndpoint>(addr, &pg, None);
             let fut = timeout(Duration::from_millis(100), rr);
             let res = fut.await;
             let elapsed = start.elapsed();

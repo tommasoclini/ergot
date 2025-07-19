@@ -32,7 +32,8 @@ use crate::{
 };
 
 use ergot_base::{
-    self as base, nash::NameHash, net_stack::NetStackHandle, socket::HeaderMessage, AnyAllAppendix, ProtocolError
+    self as base, AnyAllAppendix, ProtocolError, nash::NameHash, net_stack::NetStackHandle,
+    socket::HeaderMessage,
 };
 
 /// The `NetStack`

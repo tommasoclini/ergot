@@ -21,10 +21,7 @@ where
     Q: BbqHandle,
 {
     pub fn new(prod: FramedProducer<Q, u16>, mtu: u16) -> Self {
-        Self {
-            mtu,
-            prod,
-        }
+        Self { mtu, prod }
     }
 
     pub fn send_ty<T: Serialize>(

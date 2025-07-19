@@ -798,7 +798,11 @@ impl<const CONFIG: usize, const BOS: usize, const CONTROL: usize, const MSOS: us
 // impl ErgotHandler
 
 impl embassy_usb_0_5::Handler for ErgotHandler {
-    fn get_string(&mut self, index: embassy_usb_0_5::types::StringIndex, lang_id: u16) -> Option<&str> {
+    fn get_string(
+        &mut self,
+        index: embassy_usb_0_5::types::StringIndex,
+        lang_id: u16,
+    ) -> Option<&str> {
         use embassy_usb_0_5::descriptor::lang_id;
 
         let stindx = STINDX.load(Ordering::Relaxed);
