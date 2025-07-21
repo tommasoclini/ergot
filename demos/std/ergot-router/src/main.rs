@@ -1,6 +1,6 @@
 use ergot::{
     Address, NetStack,
-    interface_manager::std_tcp_router::{StdTcpIm, register_interface},
+    interface_manager::impls::std_tcp_router::{StdTcpIm, register_interface},
     topic,
     well_known::ErgotPingEndpoint,
 };
@@ -15,6 +15,8 @@ use std::{io, pin::pin, time::Duration};
 
 // Server
 static STACK: NetStack<CriticalSectionRawMutex, StdTcpIm> = NetStack::new();
+const MAX_ERGOT_PACKET_SIZE: u16 = 1024;
+const TX_BUFFER_SIZE: usize = 4096;
 
 topic!(YeetTopic, u64, "topic/yeet");
 
@@ -34,7 +36,8 @@ async fn main() -> io::Result<()> {
     loop {
         let (socket, addr) = listener.accept().await?;
         info!("Connect {addr:?}");
-        let hdl = register_interface(STACK.base(), socket).unwrap();
+        let hdl = register_interface(STACK.base(), socket, MAX_ERGOT_PACKET_SIZE, TX_BUFFER_SIZE)
+            .unwrap();
 
         tokio::task::spawn(async move {
             let res = hdl.run().await;

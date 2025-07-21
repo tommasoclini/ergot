@@ -1,29 +1,14 @@
-/*
-    Let's see, we're going to need:
-
-    * Some kind of hashmap/vec of active interfaces, by network id?
-        * IF we use a vec, we should NOT use the index as the ID, it may be sparse
-    * The actual interface type probably gets defined by the interface manager
-    * The interface which follows the pinned rules, and removes itself on drop
-    * THIS version of the routing interface probably will not allow for other routers,
-        we probably have to assume we are the only one assigning network IDs until a
-        later point
-    * The associated "simple" version of a client probably needs a stub routing interface
-        that picks up the network ID from the destination address
-    * Honestly we might want to have an `Arc` version of the netstack, or we need some kind
-        of Once construction.
-    * The interface manager needs some kind of "handle" construction so that we can get mut
-        access to it, or we need an accessor via the netstack
-*/
-
 use crate::{
     Header, NetStack,
     interface_manager::{
         ConstInit, InterfaceManager, InterfaceSendError,
-        framed_stream::{self, Interface},
-        std_utils::{ReceiverError, StdQueue},
+        utils::{
+            edge::CentralInterface,
+            framed_stream::{self, Interface},
+            std::{ReceiverError, StdQueue},
+        },
     },
-    wire_frames::{CommonHeader, de_frame},
+    wire_frames::de_frame,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -57,6 +42,10 @@ pub struct NusbManager {
     inner: UnsafeCell<MaybeUninit<NusbManagerInner>>,
 }
 
+pub struct Node {
+    interface: CentralInterface<Interface<StdQueue>>,
+}
+
 #[derive(Default)]
 pub struct NusbManagerInner {
     // TODO: we probably want something like iddqd for a hashset sorted by
@@ -65,9 +54,7 @@ pub struct NusbManagerInner {
     //
     // TODO: for the no-std version of this, we will need to use the same
     // intrusive list stuff that we use for sockets for holding interfaces.
-    interfaces: Vec<NusbTxHandle>,
-    seq_no: u16,
-    any_closed: bool,
+    interfaces: Vec<Node>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,13 +62,31 @@ pub enum Error {
     OutOfNetIds,
 }
 
-struct NusbTxHandle {
-    net_id: u16,
-    skt_tx: Interface<StdQueue>,
-    closer: Arc<WaitQueue>,
-}
-
 // ---- impls ----
+
+impl Node {
+    pub fn new(
+        net_id: u16,
+        outgoing_buffer_size: usize,
+        max_ergot_packet_size: u16,
+    ) -> (Self, FramedConsumer<StdQueue>) {
+        // todo: configurable channel depth
+        let q = bbq2::nicknames::Lechon::new_with_storage(BoxedSlice::new(outgoing_buffer_size));
+        let ctx = q.framed_producer();
+        let crx = q.framed_consumer();
+
+        let ctx = framed_stream::Interface {
+            mtu: max_ergot_packet_size,
+            prod: ctx,
+        };
+
+        let me = Node {
+            interface: CentralInterface::new(ctx, net_id),
+        };
+
+        (me, crx)
+    }
+}
 
 // impl NusbRecvHdl
 /// How many in-flight requests at once - allows nusb to keep pulling frames
@@ -92,17 +97,30 @@ pub(crate) const MAX_STALL_RETRIES: usize = 3;
 
 impl<R: ScopedRawMutex + 'static> NusbRecvHdl<R> {
     pub async fn run(mut self) -> Result<(), ReceiverError> {
-        let res = self.run_inner().await;
-        self.closer.close();
-        // todo: this could live somewhere else?
+        let close = self.closer.clone();
+
+        // Wait for the receiver to encounter an error, or wait for
+        // the transmitter to signal that it observed an error
+        let res = select! {
+            run = self.run_inner() => {
+                // Halt the TX worker
+                self.closer.close();
+                Err(run)
+            },
+            _clf = close.wait() => Err(ReceiverError::SocketClosed),
+        };
+
+        // Remove this interface from the list
         self.stack.with_interface_manager(|im| {
             let inner = im.get_or_init_inner();
-            inner.any_closed = true;
+            inner
+                .interfaces
+                .retain(|n| n.interface.net_id() != self.net_id);
         });
         res
     }
 
-    pub async fn run_inner(&mut self) -> Result<(), ReceiverError> {
+    pub async fn run_inner(&mut self) -> ReceiverError {
         loop {
             // Rehydrate the queue
             let pending = self.biq.pending();
@@ -171,7 +189,7 @@ impl<R: ScopedRawMutex + 'static> NusbRecvHdl<R> {
                     error!("Fatal Error, exiting");
                     // When we close the channel, all pending receivers and subscribers
                     // will be notified
-                    return Err(ReceiverError::SocketClosed);
+                    return ReceiverError::SocketClosed;
                 } else {
                     info!("Potential recovery, resuming NusbWireRx::recv_inner");
                     continue;
@@ -233,7 +251,11 @@ impl NusbManager {
 
     pub fn get_nets(&mut self) -> Vec<u16> {
         let inner = self.get_or_init_inner();
-        inner.interfaces.iter().map(|i| i.net_id).collect()
+        inner
+            .interfaces
+            .iter()
+            .map(|i| i.interface.net_id())
+            .collect()
     }
 
     fn get_or_init_inner(&mut self) -> &mut NusbManagerInner {
@@ -249,62 +271,26 @@ impl NusbManager {
 }
 
 impl NusbManager {
-    fn common_send<'a, 'b>(
+    fn find<'b>(
         &'b mut self,
-        ihdr: &'a Header,
-    ) -> Result<(&'b mut NusbTxHandle, CommonHeader), InterfaceSendError> {
+        ihdr: &Header,
+    ) -> Result<&'b mut CentralInterface<Interface<StdQueue>>, InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
         assert!(!(ihdr.dst.port_id == 0 && ihdr.any_all.is_none()));
 
         let inner = self.get_or_init_inner();
+
         // todo: dedupe w/ send
         //
         // todo: we only handle direct dests
         let Ok(idx) = inner
             .interfaces
-            .binary_search_by_key(&ihdr.dst.network_id, |int| int.net_id)
+            .binary_search_by_key(&ihdr.dst.network_id, |int| int.interface.net_id())
         else {
             return Err(InterfaceSendError::NoRouteToDest);
         };
 
-        let interface = &mut inner.interfaces[idx];
-        // TODO: Assumption: "we" are always node_id==1
-        if ihdr.dst.network_id == interface.net_id && ihdr.dst.node_id == 1 {
-            return Err(InterfaceSendError::DestinationLocal);
-        }
-
-        // Now that we've filtered out "dest local" checks, see if there is
-        // any TTL left before we send to the next hop
-        let mut hdr = ihdr.clone();
-        hdr.decrement_ttl()?;
-
-        // If the source is local, rewrite the source using this interface's
-        // information so responses can find their way back here
-        if hdr.src.net_node_any() {
-            // todo: if we know the destination is EXACTLY this network,
-            // we could leave the network_id local to allow for shorter
-            // addresses
-            hdr.src.network_id = interface.net_id;
-            hdr.src.node_id = 1;
-        }
-
-        let seq_no = inner.seq_no;
-        inner.seq_no = inner.seq_no.wrapping_add(1);
-
-        let header = CommonHeader {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq_no,
-            kind: hdr.kind,
-            ttl: hdr.ttl,
-        };
-        if [0, 255].contains(&hdr.dst.port_id) {
-            if ihdr.any_all.is_none() {
-                return Err(InterfaceSendError::AnyPortMissingKey);
-            }
-        }
-
-        Ok((interface, header))
+        Ok(&mut inner.interfaces[idx].interface)
     }
 }
 
@@ -314,13 +300,8 @@ impl InterfaceManager for NusbManager {
         hdr: &Header,
         data: &T,
     ) -> Result<(), InterfaceSendError> {
-        let (intfc, header) = self.common_send(hdr)?;
-        let res = intfc.skt_tx.send_ty(&header, hdr.any_all.as_ref(), data);
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(()) => Err(InterfaceSendError::InterfaceFull),
-        }
+        let intfc = self.find(hdr)?;
+        intfc.send(hdr, data)
     }
 
     fn send_raw(
@@ -329,13 +310,8 @@ impl InterfaceManager for NusbManager {
         hdr_raw: &[u8],
         data: &[u8],
     ) -> Result<(), InterfaceSendError> {
-        let (intfc, header) = self.common_send(hdr)?;
-        let res = intfc.skt_tx.send_raw(&header, hdr_raw, data);
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(()) => Err(InterfaceSendError::InterfaceFull),
-        }
+        let intfc = self.find(hdr)?;
+        intfc.send_raw(hdr, hdr_raw, data)
     }
 
     fn send_err(
@@ -343,13 +319,8 @@ impl InterfaceManager for NusbManager {
         hdr: &Header,
         err: crate::ProtocolError,
     ) -> Result<(), InterfaceSendError> {
-        let (intfc, header) = self.common_send(hdr)?;
-        let res = intfc.skt_tx.send_err(&header, err);
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(()) => Err(InterfaceSendError::InterfaceFull),
-        }
+        let intfc = self.find(hdr)?;
+        intfc.send_err(hdr, err)
     }
 }
 
@@ -378,18 +349,8 @@ impl NusbManagerInner {
     ) -> Option<(u16, Arc<WaitQueue>)> {
         let closer = Arc::new(WaitQueue::new());
         if self.interfaces.is_empty() {
-            // todo: configurable channel depth
-            let q =
-                bbq2::nicknames::Lechon::new_with_storage(BoxedSlice::new(outgoing_buffer_size));
-            let ctx = q.framed_producer();
-            let crx = q.framed_consumer();
-
-            let ctx = framed_stream::Interface {
-                mtu: max_ergot_packet_size,
-                prod: ctx,
-            };
-
             let net_id = 1;
+            let (node, crx) = Node::new(net_id, outgoing_buffer_size, max_ergot_packet_size);
             // TODO: We are spawning in a non-async context!
             tokio::task::spawn(tx_worker(
                 net_id,
@@ -398,11 +359,7 @@ impl NusbManagerInner {
                 crx,
                 closer.clone(),
             ));
-            self.interfaces.push(NusbTxHandle {
-                net_id,
-                skt_tx: ctx,
-                closer: closer.clone(),
-            });
+            self.interfaces.push(node);
             debug!("Alloc'd net_id 1");
             return Some((net_id, closer));
         } else if self.interfaces.len() >= 65534 {
@@ -410,26 +367,15 @@ impl NusbManagerInner {
             return None;
         }
 
-        // If we closed any interfaces, then collect
-        if self.any_closed {
-            self.interfaces.retain(|int| {
-                let closed = int.closer.is_closed();
-                if closed {
-                    info!("Collecting interface {}", int.net_id);
-                }
-                !closed
-            });
-        }
-
         let mut net_id = 1;
         // we're not empty, find the lowest free address by counting the
         // indexes, and if we find a discontinuity, allocate the first one.
         for intfc in self.interfaces.iter() {
-            if intfc.net_id > net_id {
+            if intfc.interface.net_id() > net_id {
                 trace!("Found gap: {net_id}");
                 break;
             }
-            debug_assert!(intfc.net_id == net_id);
+            debug_assert!(intfc.interface.net_id() == net_id);
             net_id += 1;
         }
         // EITHER: We've found a gap that we can use, OR we've iterated all
@@ -437,15 +383,7 @@ impl NusbManagerInner {
         // have not exhausted the range.
         debug_assert!(net_id > 0 && net_id != u16::MAX);
 
-        let q = bbq2::nicknames::Lechon::new_with_storage(BoxedSlice::new(outgoing_buffer_size));
-        let ctx = q.framed_producer();
-        let crx = q.framed_consumer();
-
-        let ctx = framed_stream::Interface {
-            mtu: max_ergot_packet_size,
-            prod: ctx,
-        };
-
+        let (node, crx) = Node::new(net_id, outgoing_buffer_size, max_ergot_packet_size);
         debug!("allocated net_id {net_id}");
 
         tokio::task::spawn(tx_worker(
@@ -455,12 +393,9 @@ impl NusbManagerInner {
             crx,
             closer.clone(),
         ));
-        self.interfaces.push(NusbTxHandle {
-            net_id,
-            skt_tx: ctx,
-            closer: closer.clone(),
-        });
-        self.interfaces.sort_unstable_by_key(|i| i.net_id);
+        self.interfaces.push(node);
+        self.interfaces
+            .sort_unstable_by_key(|i| i.interface.net_id());
         Some((net_id, closer))
     }
 }
@@ -470,9 +405,21 @@ impl NusbManagerInner {
 async fn tx_worker(
     net_id: u16,
     max_usb_frame_size: Option<usize>,
-    mut boq: Queue<Vec<u8>>,
+    boq: Queue<Vec<u8>>,
     rx: FramedConsumer<StdQueue>,
     closer: Arc<WaitQueue>,
+) {
+    tx_worker_inner(net_id, max_usb_frame_size, boq, rx, &closer).await;
+    warn!("Closing interface {net_id}");
+    closer.close();
+}
+
+async fn tx_worker_inner(
+    net_id: u16,
+    max_usb_frame_size: Option<usize>,
+    mut boq: Queue<Vec<u8>>,
+    rx: FramedConsumer<StdQueue>,
+    closer: &WaitQueue,
 ) {
     info!("Started tx_worker for net_id {net_id}");
     loop {
@@ -482,7 +429,7 @@ async fn tx_worker(
         let frame = select! {
             r = rxf => r,
             _c = clf => {
-                break;
+                return;
             }
         };
 
@@ -518,8 +465,6 @@ async fn tx_worker(
 
         frame.release();
     }
-    // TODO: GC waker?
-    warn!("Closing interface {net_id}");
 }
 
 pub fn register_interface<R: ScopedRawMutex>(

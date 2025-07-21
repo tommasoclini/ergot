@@ -39,28 +39,11 @@
 //!
 //! [`NetStack`]: crate::NetStack
 
-use crate::{Header, ProtocolError};
+use crate::{AnyAllAppendix, Header, ProtocolError, wire_frames::CommonHeader};
 use serde::Serialize;
 
-pub mod cobs_stream;
-pub mod framed_stream;
-pub mod null;
-
-#[cfg(feature = "embassy-usb-v0_4")]
-pub mod eusb_0_4_client;
-
-#[cfg(feature = "embassy-usb-v0_5")]
-pub mod eusb_0_5_client;
-
-#[cfg(feature = "nusb-v0_1")]
-pub mod nusb_0_1_router;
-
-#[cfg(feature = "std")]
-pub mod std_tcp_client;
-#[cfg(feature = "std")]
-pub mod std_tcp_router;
-#[cfg(feature = "std")]
-pub mod std_utils;
+pub mod impls;
+pub mod utils;
 
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -85,7 +68,7 @@ pub trait ConstInit {
 }
 
 // An interface send is very similar to a socket send, with the exception
-// that interface sends are ALWAYS a serializing operation (or requires
+// that interface sends are ALWAYS a serializing operation (or required
 // serialization has already been done), which means we don't need to
 // differentiate between "send owned" and "send borrowed". The exception
 // to this is "send raw", where serialization has already been done, e.g.
@@ -112,4 +95,20 @@ impl InterfaceSendError {
             InterfaceSendError::TtlExpired => ProtocolError::ISE_TTL_EXPIRED,
         }
     }
+}
+
+/// The "Sink" side of the interface.
+///
+/// This is typically held by an InterfaceManager, and feeds data to the interface's
+/// TX worker.
+#[allow(clippy::result_unit_err)]
+pub trait InterfaceSink {
+    fn send_ty<T: Serialize>(
+        &mut self,
+        hdr: &CommonHeader,
+        apdx: Option<&AnyAllAppendix>,
+        body: &T,
+    ) -> Result<(), ()>;
+    fn send_raw(&mut self, hdr: &CommonHeader, hdr_raw: &[u8], body: &[u8]) -> Result<(), ()>;
+    fn send_err(&mut self, hdr: &CommonHeader, err: ProtocolError) -> Result<(), ()>;
 }
