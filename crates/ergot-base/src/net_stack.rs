@@ -27,28 +27,28 @@ use serde::Serialize;
 
 use crate::{
     FrameKind, Header, ProtocolError,
-    interface_manager::{self, InterfaceManager, InterfaceSendError},
+    interface_manager::{self, InterfaceSendError, Profile},
     socket::{SocketHeader, SocketSendError, SocketVTable},
 };
 
 /// The Ergot Netstack
-pub struct NetStack<R: ScopedRawMutex, M: InterfaceManager> {
-    inner: BlockingMutex<R, NetStackInner<M>>,
+pub struct NetStack<R: ScopedRawMutex, P: Profile> {
+    inner: BlockingMutex<R, NetStackInner<P>>,
 }
 
 pub trait NetStackHandle
 where
-    Self: Sized,
+    Self: Sized + Clone,
 {
-    type Target: Deref<Target = NetStack<Self::Mutex, Self::Interface>> + Clone;
+    type Target: Deref<Target = NetStack<Self::Mutex, Self::Profile>> + Clone;
     type Mutex: ScopedRawMutex;
-    type Interface: InterfaceManager;
+    type Profile: Profile;
     fn stack(&self) -> Self::Target;
 }
 
-pub(crate) struct NetStackInner<M: InterfaceManager> {
+pub(crate) struct NetStackInner<P: Profile> {
     sockets: List<SocketHeader>,
-    manager: M,
+    profile: P,
     pcache_bits: u32,
     pcache_start: u8,
     seq_no: u16,
@@ -70,13 +70,13 @@ pub enum NetStackSendError {
 // ---- impl NetStack ----
 
 // TODO: Impl for Arc
-impl<R, M> NetStackHandle for &'_ NetStack<R, M>
+impl<R, P> NetStackHandle for &'_ NetStack<R, P>
 where
     R: ScopedRawMutex,
-    M: InterfaceManager,
+    P: Profile,
 {
     type Mutex = R;
-    type Interface = M;
+    type Profile = P;
     type Target = Self;
 
     fn stack(&self) -> Self::Target {
@@ -84,15 +84,30 @@ where
     }
 }
 
-impl<R, M> NetStack<R, M>
+#[cfg(feature = "std")]
+impl<R, P> NetStackHandle for std::sync::Arc<NetStack<R, P>>
+where
+    R: ScopedRawMutex,
+    P: Profile,
+{
+    type Mutex = R;
+    type Profile = P;
+    type Target = Self;
+
+    fn stack(&self) -> Self::Target {
+        self.clone()
+    }
+}
+
+impl<R, P> NetStack<R, P>
 where
     R: ScopedRawMutex + ConstInit,
-    M: InterfaceManager + interface_manager::ConstInit,
+    P: Profile + interface_manager::ConstInit,
 {
     /// Create a new, uninitialized [`NetStack`].
     ///
     /// Requires that the [`ScopedRawMutex`] implements the [`mutex::ConstInit`]
-    /// trait, and the [`InterfaceManager`] implements the
+    /// trait, and the [`Profile`] implements the
     /// [`interface_manager::ConstInit`] trait.
     ///
     /// ## Example
@@ -100,9 +115,9 @@ where
     /// ```rust
     /// use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
     /// use ergot_base::NetStack;
-    /// use ergot_base::interface_manager::impls::null::NullInterfaceManager as NullIM;
+    /// use ergot_base::interface_manager::profiles::null::Null;
     ///
-    /// static STACK: NetStack<CSRMutex, NullIM> = NetStack::new();
+    /// static STACK: NetStack<CSRMutex, Null> = NetStack::new();
     /// ```
     pub const fn new() -> Self {
         Self {
@@ -111,25 +126,50 @@ where
     }
 }
 
-impl<R, M> NetStack<R, M>
+impl<R, P> NetStack<R, P>
+where
+    R: ScopedRawMutex + ConstInit,
+    P: Profile,
+{
+    pub const fn new_with_profile(p: P) -> Self {
+        Self {
+            inner: BlockingMutex::new(NetStackInner::new_with_profile(p)),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<R, P> NetStack<R, P>
+where
+    R: ScopedRawMutex + ConstInit,
+    P: Profile,
+{
+    pub fn new_arc(p: P) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner: BlockingMutex::new(NetStackInner::new_with_profile(p)),
+        })
+    }
+}
+
+impl<R, P> NetStack<R, P>
 where
     R: ScopedRawMutex,
-    M: InterfaceManager,
+    P: Profile,
 {
     /// Manually create a new, uninitialized [`NetStack`].
     ///
-    /// This method is useful if your [`ScopedRawMutex`] or [`InterfaceManager`]
+    /// This method is useful if your [`ScopedRawMutex`] or [`Profile`]
     /// do not implement their corresponding `ConstInit` trait.
     ///
     /// In general, this is most often only needed for `loom` testing, and
     /// [`NetStack::new()`] should be used when possible.
-    pub const fn const_new(r: R, m: M) -> Self {
+    pub const fn const_new(r: R, p: P) -> Self {
         Self {
             inner: BlockingMutex::const_new(
                 r,
                 NetStackInner {
                     sockets: List::new(),
-                    manager: m,
+                    profile: p,
                     seq_no: 0,
                     pcache_start: 0,
                     pcache_bits: 0,
@@ -138,25 +178,25 @@ where
         }
     }
 
-    /// Access the contained [`InterfaceManager`].
+    /// Access the contained [`Profile`].
     ///
-    /// Access to the [`InterfaceManager`] is made via the provided closure.
+    /// Access to the [`Profile`] is made via the provided closure.
     /// The [`BlockingMutex`] is locked for the duration of this access,
     /// inhibiting all other usage of this [`NetStack`].
     ///
     /// This can be used to add new interfaces, obtain metadata, or other
-    /// actions supported by the chosen [`InterfaceManager`].
+    /// actions supported by the chosen [`Profile`].
     ///
     /// ## Example
     ///
     /// ```rust
     /// # use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
     /// # use ergot_base::NetStack;
-    /// # use ergot_base::interface_manager::impls::null::NullInterfaceManager as NullIM;
+    /// # use ergot_base::interface_manager::profiles::null::Null;
     /// #
-    /// static STACK: NetStack<CSRMutex, NullIM> = NetStack::new();
+    /// static STACK: NetStack<CSRMutex, Null> = NetStack::new();
     ///
-    /// let res = STACK.with_interface_manager(|im| {
+    /// let res = STACK.manage_profile(|im| {
     ///    // The mutex is locked for the full duration of this closure.
     ///    # _ = im;
     ///    // We can return whatever we want from this context, though not
@@ -165,8 +205,8 @@ where
     /// });
     /// assert_eq!(res, 42);
     /// ```
-    pub fn with_interface_manager<F: FnOnce(&mut M) -> U, U>(&self, f: F) -> U {
-        self.inner.with_lock(|inner| f(&mut inner.manager))
+    pub fn manage_profile<F: FnOnce(&mut P) -> U, U>(&self, f: F) -> U {
+        self.inner.with_lock(|inner| f(&mut inner.profile))
     }
 
     /// Send a raw (pre-serialized) message.
@@ -241,10 +281,10 @@ where
     }
 }
 
-impl<R, M> Default for NetStack<R, M>
+impl<R, P> Default for NetStack<R, P>
 where
     R: ScopedRawMutex + ConstInit,
-    M: InterfaceManager + interface_manager::ConstInit,
+    P: Profile + interface_manager::ConstInit,
 {
     fn default() -> Self {
         Self::new()
@@ -253,15 +293,15 @@ where
 
 // ---- impl NetStackInner ----
 
-impl<M> NetStackInner<M>
+impl<P> NetStackInner<P>
 where
-    M: InterfaceManager,
-    M: interface_manager::ConstInit,
+    P: Profile,
+    P: interface_manager::ConstInit,
 {
     pub const fn new() -> Self {
         Self {
             sockets: List::new(),
-            manager: M::INIT,
+            profile: P::INIT,
             seq_no: 0,
             pcache_bits: 0,
             pcache_start: 0,
@@ -269,10 +309,21 @@ where
     }
 }
 
-impl<M> NetStackInner<M>
+impl<P> NetStackInner<P>
 where
-    M: InterfaceManager,
+    P: Profile,
 {
+    /// Create a netstack with a given profile
+    pub const fn new_with_profile(p: P) -> Self {
+        Self {
+            sockets: List::new(),
+            profile: p,
+            seq_no: 0,
+            pcache_bits: 0,
+            pcache_start: 0,
+        }
+    }
+
     /// Method that handles broadcast logic
     ///
     /// Takes closures for sending to a socket or sending to the manager to allow
@@ -417,7 +468,7 @@ where
         let Self {
             sockets,
             seq_no,
-            manager,
+            profile: manager,
             ..
         } = self;
         trace!("Sending msg raw w/ header: {hdr:?}");
@@ -453,7 +504,7 @@ where
         let Self {
             sockets,
             seq_no,
-            manager,
+            profile: manager,
             ..
         } = self;
         trace!("Sending msg ty w/ header: {hdr:?}");
@@ -485,7 +536,7 @@ where
         let Self {
             sockets,
             seq_no,
-            manager,
+            profile: manager,
             ..
         } = self;
         trace!("Sending msg ty w/ header: {hdr:?}");
@@ -688,29 +739,6 @@ where
         }
     }
 
-    // /// Helper message for sending a raw message to a given socket
-    // fn send_err_raw_to_socket(
-    //     this: NonNull<SocketHeader>,
-    //     body: &[u8],
-    //     hdr: &Header,
-    //     seq_no: &mut u16,
-    // ) -> Result<(), NetStackSendError> {
-    //     let vtable: &'static SocketVTable = {
-    //         let skt_ref = unsafe { this.as_ref() };
-    //         skt_ref.vtable
-    //     };
-    //     let f = vtable.recv_raw;
-
-    //     let this: NonNull<()> = this.cast();
-    //     let hdr = hdr.to_headerseq_or_with_seq(|| {
-    //         let seq = *seq_no;
-    //         *seq_no = seq_no.wrapping_add(1);
-    //         seq
-    //     });
-
-    //     (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
-    // }
-
     /// Helper message for sending a raw message to a given socket
     fn send_raw_to_socket(
         this: NonNull<SocketHeader>,
@@ -736,9 +764,9 @@ where
     }
 }
 
-impl<M> NetStackInner<M>
+impl<P> NetStackInner<P>
 where
-    M: InterfaceManager,
+    P: Profile,
 {
     /// Cache-based allocator inspired by littlefs2 ID allocator
     ///
@@ -850,13 +878,13 @@ mod test {
 
     use crate::{
         FrameKind, Key, NetStack,
-        interface_manager::impls::null::NullInterfaceManager,
+        interface_manager::profiles::null::Null,
         socket::{Attributes, owned::single::Socket},
     };
 
     #[test]
     fn port_alloc() {
-        static STACK: NetStack<CriticalSectionRawMutex, NullInterfaceManager> = NetStack::new();
+        static STACK: NetStack<CriticalSectionRawMutex, Null> = NetStack::new();
 
         let mut v = vec![];
 

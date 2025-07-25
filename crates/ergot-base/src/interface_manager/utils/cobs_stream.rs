@@ -13,7 +13,7 @@ use crate::{
     wire_frames::{self, CommonHeader},
 };
 
-pub struct Interface<Q>
+pub struct Sink<Q>
 where
     Q: BbqHandle,
 {
@@ -22,7 +22,24 @@ where
 }
 
 #[allow(clippy::result_unit_err)] // todo
-impl<Q> InterfaceSink for Interface<Q>
+impl<Q> Sink<Q>
+where
+    Q: BbqHandle,
+{
+    pub fn new_from_handle(q: Q, mtu: u16) -> Self {
+        Self {
+            mtu,
+            prod: q.stream_producer(),
+        }
+    }
+
+    pub const fn new(prod: StreamProducer<Q>, mtu: u16) -> Self {
+        Self { mtu, prod }
+    }
+}
+
+#[allow(clippy::result_unit_err)] // todo
+impl<Q> InterfaceSink for Sink<Q>
 where
     Q: BbqHandle,
 {

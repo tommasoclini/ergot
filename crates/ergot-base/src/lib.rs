@@ -160,3 +160,9 @@ impl From<HeaderSeq> for Header {
 }
 
 pub const DEFAULT_TTL: u8 = 16;
+
+/// Exports of used crate versions
+pub mod exports {
+    pub use bbq2;
+    pub use mutex;
+}

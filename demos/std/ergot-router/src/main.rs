@@ -1,11 +1,10 @@
 use ergot::{
-    Address, NetStack,
-    interface_manager::impls::std_tcp_router::{StdTcpIm, register_interface},
+    Address,
+    toolkits::std_tcp::{RouterStack, register_router_interface},
     topic,
     well_known::ErgotPingEndpoint,
 };
-use log::{info, warn};
-use mutex::raw_impls::cs::CriticalSectionRawMutex;
+use log::info;
 use tokio::{
     net::TcpListener,
     time::{interval, timeout},
@@ -14,7 +13,6 @@ use tokio::{
 use std::{io, pin::pin, time::Duration};
 
 // Server
-static STACK: NetStack<CriticalSectionRawMutex, StdTcpIm> = NetStack::new();
 const MAX_ERGOT_PACKET_SIZE: u16 = 1024;
 const TX_BUFFER_SIZE: usize = 4096;
 
@@ -24,39 +22,35 @@ topic!(YeetTopic, u64, "topic/yeet");
 async fn main() -> io::Result<()> {
     env_logger::init();
     let listener = TcpListener::bind("127.0.0.1:2025").await?;
+    let stack: RouterStack = RouterStack::new();
 
-    tokio::task::spawn(ping_all());
+    tokio::task::spawn(ping_all(stack.clone()));
 
     for i in 1..4 {
-        tokio::task::spawn(yeet_listener(i));
+        tokio::task::spawn(yeet_listener(stack.clone(), i));
     }
 
     // TODO: Should the library just do this for us? something like
-    // `serve(listener).await`, or just `serve(&STACK, "127.0.0.1:2025").await`?
     loop {
         let (socket, addr) = listener.accept().await?;
         info!("Connect {addr:?}");
-        let hdl = register_interface(STACK.base(), socket, MAX_ERGOT_PACKET_SIZE, TX_BUFFER_SIZE)
+        register_router_interface(&stack, socket, MAX_ERGOT_PACKET_SIZE, TX_BUFFER_SIZE)
+            .await
             .unwrap();
-
-        tokio::task::spawn(async move {
-            let res = hdl.run().await;
-            warn!("END: {res:?}");
-        });
     }
 }
 
-async fn ping_all() {
+async fn ping_all(stack: RouterStack) {
     let mut ival = interval(Duration::from_secs(3));
     let mut ctr = 0u32;
     loop {
         ival.tick().await;
-        let nets = STACK.with_interface_manager(|im| im.get_nets());
+        let nets = stack.manage_profile(|im| im.get_nets());
         info!("Nets to ping: {nets:?}");
         for net in nets {
             let pg = ctr;
             ctr = ctr.wrapping_add(1);
-            let rr = STACK.req_resp::<ErgotPingEndpoint>(
+            let rr = stack.req_resp::<ErgotPingEndpoint>(
                 Address {
                     network_id: net,
                     node_id: 2,
@@ -75,8 +69,8 @@ async fn ping_all() {
     }
 }
 
-async fn yeet_listener(id: u8) {
-    let subber = STACK.std_bounded_topic_receiver::<YeetTopic>(64, None);
+async fn yeet_listener(stack: RouterStack, id: u8) {
+    let subber = stack.std_bounded_topic_receiver::<YeetTopic>(64, None);
     let subber = pin!(subber);
     let mut hdl = subber.subscribe();
 

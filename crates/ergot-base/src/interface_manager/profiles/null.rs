@@ -1,19 +1,28 @@
+//! The Null Profile
+//!
+//! This is the simplest profile, and does not handle external connections at all.
+//!
+//! Useful for testing, or cases where only local communication is desirable.
+
 use serde::Serialize;
 
 use crate::{
     Header,
-    interface_manager::{ConstInit, InterfaceManager, InterfaceSendError},
+    interface_manager::{ConstInit, InterfaceSendError, InterfaceState, Profile, SetStateError},
 };
 
-pub struct NullInterfaceManager {
+/// The null profile
+pub struct Null {
     _priv: (),
 }
 
-impl ConstInit for NullInterfaceManager {
+impl ConstInit for Null {
     const INIT: Self = Self { _priv: () };
 }
 
-impl InterfaceManager for NullInterfaceManager {
+impl Profile for Null {
+    type InterfaceIdent = ();
+
     fn send<T: Serialize>(&mut self, hdr: &Header, _data: &T) -> Result<(), InterfaceSendError> {
         if hdr.dst.net_node_any() {
             Err(InterfaceSendError::DestinationLocal)
@@ -45,5 +54,17 @@ impl InterfaceManager for NullInterfaceManager {
         } else {
             Err(InterfaceSendError::NoRouteToDest)
         }
+    }
+
+    fn interface_state(&mut self, _ident: Self::InterfaceIdent) -> Option<InterfaceState> {
+        None
+    }
+
+    fn set_interface_state(
+        &mut self,
+        _ident: Self::InterfaceIdent,
+        _state: InterfaceState,
+    ) -> Result<(), crate::interface_manager::SetStateError> {
+        Err(SetStateError::InterfaceNotFound)
     }
 }
