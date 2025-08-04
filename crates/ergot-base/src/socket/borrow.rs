@@ -43,7 +43,7 @@ use super::{Attributes, HeaderMessage, Response, SocketHeader, SocketSendError, 
 pub struct Socket<Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     // LOAD BEARING: must be first
@@ -57,7 +57,7 @@ where
 pub struct SocketHdl<'a, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     pub(crate) ptr: NonNull<Socket<Q, T, N>>,
@@ -68,7 +68,7 @@ where
 pub struct Recv<'a, 'b, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     hdl: &'a mut SocketHdl<'b, Q, T, N>,
@@ -100,7 +100,7 @@ enum ResponseGrantInner<Q: BbqHandle, T> {
 impl<Q, T, N> Socket<Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     pub const fn new(
@@ -250,11 +250,10 @@ where
         this: NonNull<()>,
         that: NonNull<()>,
         hdr: HeaderSeq,
+        serfn: fn(NonNull<()>, HeaderSeq, &mut [u8]) -> Result<usize, SocketSendError>,
     ) -> Result<(), SocketSendError> {
         let this: NonNull<Self> = this.cast();
         let this: &Self = unsafe { this.as_ref() };
-        let that: NonNull<T> = that.cast();
-        let that: &T = unsafe { that.as_ref() };
         let qbox: &mut QueueBox<Q> = unsafe { &mut *this.inner.get() };
         let qref = qbox.q.bbq_ref();
         let prod = qref.framed_producer();
@@ -262,21 +261,9 @@ where
         let Ok(mut wgr) = prod.grant(this.mtu) else {
             return Err(SocketSendError::NoSpace);
         };
-        let ser = ser_flavors::Slice::new(&mut wgr);
 
-        let chdr = CommonHeader {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq_no: hdr.seq_no,
-            kind: hdr.kind,
-            ttl: hdr.ttl,
-        };
-
-        let Ok(used) = wire_frames::encode_frame_ty(ser, &chdr, hdr.any_all.as_ref(), that) else {
-            return Err(SocketSendError::NoSpace);
-        };
-
-        let len = used.len() as u16;
+        let used = serfn(that, hdr, &mut wgr)?;
+        let len = used as u16;
         wgr.commit(len);
 
         if let Some(wake) = qbox.waker.take() {
@@ -323,7 +310,7 @@ where
 impl<'a, Q, T, N> SocketHdl<'a, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     pub fn port(&self) -> u8 {
@@ -342,7 +329,7 @@ where
 impl<Q, T, N> Drop for Socket<Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     fn drop(&mut self) {
@@ -356,7 +343,7 @@ where
 unsafe impl<Q, T, N> Send for SocketHdl<'_, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
 }
@@ -364,7 +351,7 @@ where
 unsafe impl<Q, T, N> Sync for SocketHdl<'_, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
 }
@@ -374,7 +361,7 @@ where
 impl<'a, Q, T, N> Future for Recv<'a, '_, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
     type Output = ResponseGrant<Q, T>;
@@ -459,7 +446,7 @@ where
 unsafe impl<Q, T, N> Sync for Recv<'_, '_, Q, T, N>
 where
     Q: BbqHandle,
-    T: Serialize + Clone,
+    T: Serialize,
     N: NetStackHandle,
 {
 }

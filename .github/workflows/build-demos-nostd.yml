@@ -17,15 +17,23 @@ jobs:
         run: rustup target add thumbv7em-none-eabi
       - name: Install thumbv6m target
         run: rustup target add thumbv6m-none-eabi
+      - name: Install riscv32imac target
+        run: rustup target add riscv32imac-unknown-none-elf
       #
       # nRF52840 demos
       #
-      - name: Check ergot (no features, on host)
+      - name: Build nRF52840 Demos
         working-directory: ./demos/nrf52840
         run: cargo build --all
       #
       # RP2040 demos
       #
-      - name: Check ergot (no features, on host)
+      - name: Build RP2040 Demos
         working-directory: ./demos/rp2040
+        run: cargo build --all
+      #
+      # ESP32C6 demos
+      #
+      - name: Check ESP32C6 Demos
+        working-directory: ./demos/esp32c6
         run: cargo build --all

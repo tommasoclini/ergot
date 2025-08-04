@@ -28,6 +28,7 @@ std = [
     "maitake-sync/std",
     "mutex/std",
     "postcard/use-std",
+    "postcard-schema/use-std",
     "tokio",
 ]
 disable-cache-padding = [
@@ -41,9 +42,16 @@ embassy-usb-v0_4 = [
 embassy-usb-v0_5 = [
     "ergot-base/embassy-usb-v0_5",
 ]
+embedded-io-async-v0_6 = [
+    "ergot-base/embedded-io-async-v0_6",
+]
 nusb-v0_1 = [
     "std",
     "ergot-base/nusb-v0_1",
+]
+tokio-serial-v5 = [
+    "std",
+    "ergot-base/tokio-serial-v5",
 ]
 
 [dependencies]
@@ -57,8 +65,11 @@ cobs                = { version = "0.3.0",  default-features = false }
 cordyceps           = { version = "0.3.4",  default-features = false }
 maitake-sync        = { version = "0.2.1",  default-features = false }
 mutex               = { version = "1.0.0",  features = ["impl-critical-section"] }
-postcard-schema     = { version = "0.2.1",  features = ["derive"] }
+postcard-schema     = { version = "0.2.4",  features = ["derive"] }
 serde               = { version = "1.0",    features = ["derive"], default-features = false }
 
 # std
 tokio               = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"], optional = true }
+
+[dev-dependencies]
+env_logger = "0.11.8"

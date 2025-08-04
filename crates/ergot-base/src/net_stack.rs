@@ -28,7 +28,7 @@ use serde::Serialize;
 use crate::{
     FrameKind, Header, ProtocolError,
     interface_manager::{self, InterfaceSendError, Profile},
-    socket::{SocketHeader, SocketSendError, SocketVTable},
+    socket::{SocketHeader, SocketSendError, SocketVTable, borser},
 };
 
 /// The Ergot Netstack
@@ -231,6 +231,10 @@ where
         t: &T,
     ) -> Result<(), NetStackSendError> {
         self.inner.with_lock(|inner| inner.send_ty(hdr, t))
+    }
+
+    pub fn send_bor<T: Serialize>(&self, hdr: &Header, t: &T) -> Result<(), NetStackSendError> {
+        self.inner.with_lock(|inner| inner.send_bor(hdr, t))
     }
 
     pub fn send_err(&self, hdr: &Header, err: ProtocolError) -> Result<(), NetStackSendError> {
@@ -531,6 +535,38 @@ where
         }
     }
 
+    /// Handle sending a borrowed message
+    fn send_bor<T: Serialize>(&mut self, hdr: &Header, t: &T) -> Result<(), NetStackSendError> {
+        let Self {
+            sockets,
+            seq_no,
+            profile: manager,
+            ..
+        } = self;
+        trace!("Sending msg bor w/ header: {hdr:?}");
+
+        if hdr.kind == FrameKind::PROTOCOL_ERROR {
+            todo!("Don't do that");
+        }
+
+        // Is this a broadcast message?
+        if hdr.dst.port_id == 255 {
+            Self::broadcast(
+                sockets,
+                hdr,
+                |skt| Self::send_bor_to_socket(skt, t, hdr, seq_no).is_ok(),
+                || manager.send(hdr, t).is_ok(),
+            )
+        } else {
+            Self::unicast(
+                sockets,
+                hdr,
+                |skt| Self::send_bor_to_socket(skt, t, hdr, seq_no),
+                || manager.send(hdr, t),
+            )
+        }
+    }
+
     /// Handle sending of a typed message
     fn send_err(&mut self, hdr: &Header, err: ProtocolError) -> Result<(), NetStackSendError> {
         let Self {
@@ -539,13 +575,12 @@ where
             profile: manager,
             ..
         } = self;
-        trace!("Sending msg ty w/ header: {hdr:?}");
+        trace!("Sending msg err w/ header: {hdr:?}");
 
         if hdr.dst.port_id == 255 {
             todo!("Don't do that");
         }
 
-        // Is this a broadcast message?
         Self::unicast_err(
             sockets,
             hdr,
@@ -700,6 +735,39 @@ where
         } else if let Some(_f) = vtable.recv_bor {
             // TODO: support send borrowed
             todo!()
+        } else {
+            // todo: keep going? If we found the "right" destination and
+            // sending fails, then there's not much we can do. Probably: there
+            // is no case where a socket has NEITHER send_owned NOR send_bor,
+            // can we make this state impossible instead?
+            Err(NetStackSendError::SocketSend(SocketSendError::WhatTheHell))
+        }
+    }
+
+    /// Helper method for sending a type to a given socket
+    fn send_bor_to_socket<T: Serialize>(
+        this: NonNull<SocketHeader>,
+        t: &T,
+        hdr: &Header,
+        seq_no: &mut u16,
+    ) -> Result<(), NetStackSendError> {
+        let vtable: &'static SocketVTable = {
+            let skt_ref = unsafe { this.as_ref() };
+            skt_ref.vtable
+        };
+
+        if let Some(f) = vtable.recv_bor {
+            let this: NonNull<()> = this.cast();
+            let that: NonNull<T> = NonNull::from(t);
+            let that: NonNull<()> = that.cast();
+            let hdr = hdr.to_headerseq_or_with_seq(|| {
+                let seq = *seq_no;
+                *seq_no = seq_no.wrapping_add(1);
+                seq
+            });
+            let func = borser::<T>;
+            let res = (f)(this, that, hdr, func).map_err(NetStackSendError::SocketSend);
+            res
         } else {
             // todo: keep going? If we found the "right" destination and
             // sending fails, then there's not much we can do. Probably: there

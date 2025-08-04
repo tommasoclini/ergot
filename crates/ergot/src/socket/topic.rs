@@ -218,3 +218,86 @@ pub mod std_bounded {
         }
     }
 }
+
+/// Topic sockets using borrowed sockets, able to receive `send_bor` messages
+pub mod stack_bor {
+    use core::pin::Pin;
+
+    use crate::traits::Topic;
+    use ergot_base::{
+        FrameKind, Key,
+        exports::bbq2::traits::bbqhdl::BbqHandle,
+        net_stack::NetStackHandle,
+        socket::{
+            Attributes,
+            borrow::{ResponseGrant, Socket, SocketHdl},
+        },
+    };
+    use serde::Serialize;
+
+    #[pin_project::pin_project]
+    pub struct Receiver<Q, T, NS>
+    where
+        Q: BbqHandle,
+        T: Topic,
+        T::Message: Serialize + Sized,
+        NS: NetStackHandle,
+    {
+        #[pin]
+        inner: Socket<Q, T::Message, NS>,
+    }
+
+    pub struct ReceiverHdl<'a, Q, T, NS>
+    where
+        Q: BbqHandle,
+        T: Topic,
+        T::Message: Serialize + Sized,
+        NS: NetStackHandle,
+    {
+        inner: SocketHdl<'a, Q, T::Message, NS>,
+    }
+
+    impl<Q, T, NS> Receiver<Q, T, NS>
+    where
+        Q: BbqHandle,
+        T: Topic,
+        T::Message: Serialize + Sized,
+        NS: NetStackHandle,
+    {
+        pub fn new(net: NS, sto: Q, mtu: u16, name: Option<&str>) -> Self {
+            Self {
+                inner: Socket::new(
+                    net.stack(),
+                    Key(T::TOPIC_KEY.to_bytes()),
+                    Attributes {
+                        kind: FrameKind::TOPIC_MSG,
+                        discoverable: true,
+                    },
+                    sto,
+                    mtu,
+                    name,
+                ),
+            }
+        }
+
+        /// Attach to the [`NetStack`](crate::net_stack::NetStack), and obtain a [`ReceiverHdl`]
+        pub fn subscribe<'a>(self: Pin<&'a mut Self>) -> ReceiverHdl<'a, Q, T, NS> {
+            let this = self.project();
+            let inner: SocketHdl<'_, Q, T::Message, NS> = this.inner.attach_broadcast();
+            ReceiverHdl { inner }
+        }
+    }
+
+    impl<Q, T, NS> ReceiverHdl<'_, Q, T, NS>
+    where
+        Q: BbqHandle,
+        T: Topic,
+        T::Message: Serialize + Sized,
+        NS: NetStackHandle,
+    {
+        /// Await the next successfully received `T::Message`
+        pub async fn recv(&mut self) -> ResponseGrant<Q, T::Message> {
+            self.inner.recv().await
+        }
+    }
+}
