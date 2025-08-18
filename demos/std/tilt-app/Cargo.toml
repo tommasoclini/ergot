@@ -1,5 +1,5 @@
 [package]
-name = "ergot-nusb-router"
+name = "tilt-app"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,4 +10,6 @@ log.workspace = true
 ergot.workspace = true
 mutex.workspace = true
 tokio.workspace = true
-
+shared-icd.workspace = true
+serde = "1.0.219"
+postcard-schema = "0.2.4"

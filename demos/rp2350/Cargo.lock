@@ -1488,10 +1488,12 @@ dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embedded-hal 1.0.0",
  "embedded-hal-async",
  "embedded-hal-bus",
  "ergot",
@@ -1499,6 +1501,9 @@ dependencies = [
  "mutex",
  "panic-probe",
  "portable-atomic",
+ "postcard-schema",
+ "serde",
+ "shared-icd",
  "static_cell",
 ]
 
@@ -1611,6 +1616,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shared-icd"
+version = "0.1.0"
+dependencies = [
+ "ergot",
+ "postcard-schema",
+ "serde",
 ]
 
 [[package]]

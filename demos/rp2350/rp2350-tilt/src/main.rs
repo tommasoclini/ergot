@@ -7,6 +7,7 @@ use core::pin::pin;
 
 use defmt::{info, warn};
 use embassy_executor::{task, Spawner};
+use embassy_rp::gpio::Input;
 use embassy_rp::spi::{self, Spi};
 use embassy_rp::usb;
 use embassy_rp::{
@@ -14,19 +15,23 @@ use embassy_rp::{
     gpio::{Level, Output},
     peripherals::USB,
 };
-use embassy_time::{Delay, Duration, Ticker, Timer};
+use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embassy_usb::{driver::Driver, Config, UsbDevice};
+use embedded_hal::spi::SpiDevice;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use ergot::ergot_base::interface_manager::Profile;
+use ergot::fmt;
+use ergot::interface_manager::InterfaceState;
 use ergot::{
     endpoint,
     exports::bbq2::{prod_cons::framed::FramedConsumer, traits::coordination::cs::CsCoord},
     toolkits::embassy_usb_v0_5 as kit,
     topic,
     well_known::ErgotPingEndpoint,
-    Address,
 };
-use lsm6ds3tr::regs;
+use lsm6ds3tr::Acc;
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
+use shared_icd::tilt::{DataTopic, Datas};
 use static_cell::{ConstStaticCell, StaticCell};
 
 use {defmt_rtt as _, panic_probe as _};
@@ -103,23 +108,30 @@ async fn main(spawner: Spawner) {
     let ser_buf = SERIAL_STRING.init(ser_buf);
     let ser_buf = core::str::from_utf8(ser_buf.as_slice()).unwrap();
 
-    let _imu_int1 = p.PIN_6;
+    let imu_int1 = p.PIN_6;
     let _imu_int2 = p.PIN_7;
     let imu_sdo = p.PIN_8;
     let imu_cs = p.PIN_9;
     let imu_sck = p.PIN_10;
     let imu_sdi = p.PIN_11;
 
+    let scope_0 = p.PIN_1;
+    let scope_1 = p.PIN_3;
+    let scope_2 = p.PIN_0;
+    let scope_3 = p.PIN_2;
+
+    let mut scope_0 = Output::new(scope_0, Level::High);
+    let mut scope_1 = Output::new(scope_1, Level::High);
+    let mut scope_2 = Output::new(scope_2, Level::High);
+    let mut scope_3 = Output::new(scope_3, Level::High);
+
     let spi = Spi::new(p.SPI1, imu_sck, imu_sdi, imu_sdo, p.DMA_CH0, p.DMA_CH1, {
         let mut cfg = spi::Config::default();
-        cfg.frequency = 8_000_000;
+        cfg.frequency = 10_000_000;
         cfg
     });
     let spi = ExclusiveDevice::new(spi, Output::new(imu_cs, Level::High), Delay).unwrap();
     Timer::after_millis(100).await;
-    let mut imu = lsm6ds3tr::Acc { d: spi };
-    let whoami = imu.read8(regs::WHO_AM_I).await.unwrap();
-    defmt::info!("Whoami said: {=u8}", whoami);
 
     // USB/RPC INIT
     let driver = usb::Driver::new(p.USB, Irqs);
@@ -135,27 +147,147 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(pingserver());
     spawner.must_spawn(yeeter());
     spawner.must_spawn(led_server([
-        Output::new(p.PIN_12, Level::High),
-        Output::new(p.PIN_13, Level::High),
-        Output::new(p.PIN_14, Level::High),
-        Output::new(p.PIN_15, Level::High),
-        Output::new(p.PIN_16, Level::High),
-        Output::new(p.PIN_17, Level::High),
-        Output::new(p.PIN_18, Level::High),
-        Output::new(p.PIN_19, Level::High),
+        Output::new(p.PIN_12, Level::Low),
+        Output::new(p.PIN_13, Level::Low),
+        Output::new(p.PIN_14, Level::Low),
+        Output::new(p.PIN_15, Level::Low),
+        Output::new(p.PIN_16, Level::Low),
+        Output::new(p.PIN_17, Level::Low),
+        Output::new(p.PIN_18, Level::Low),
+        Output::new(p.PIN_19, Level::Low),
     ]));
 
+    // Wait for connection
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         ticker.next().await;
-        let _ = STACK
-            .req_resp::<LedEndpoint>(Address::unknown(), &true, Some("led"))
-            .await;
-        ticker.next().await;
-        let _ = STACK
-            .req_resp::<LedEndpoint>(Address::unknown(), &false, Some("led"))
-            .await;
+        let has_addr = STACK.manage_profile(|p| {
+            let Some(state) = p.interface_state(()) else {
+                return false;
+            };
+            let InterfaceState::Active { net_id, .. } = state else {
+                return false;
+            };
+            net_id != 0
+        });
+
+        if has_addr {
+            STACK.info_fmt(fmt!("Connected :)"));
+            break;
+        }
     }
+
+    let mut imu_int1 = Input::new(imu_int1, embassy_rp::gpio::Pull::Up);
+    let mut imu = lsm6ds3tr::Acc { d: spi };
+    imu.james_setup().await.unwrap();
+    let mut datas = Datas::default();
+
+    // Drain data in fifo if any
+    loop {
+        let [remain_l, remain_h, _pat, _unk2, _data, _datb] =
+            imu.read_one_fifo_with_bits().unwrap();
+
+        let remain = u16::from_le_bytes([remain_l, remain_h & 0b0000_0111]);
+        if remain == 0 {
+            break;
+        }
+    }
+
+    loop {
+        // Reset all Pins
+        scope_0.set_high();
+        scope_1.set_high();
+        scope_2.set_high();
+        scope_3.set_high();
+
+        // Wait for the sensor to say "data is ready"
+        imu_int1.wait_for_low().await;
+        scope_0.set_low();
+
+        // Drain data from the sensor
+        let res = filler(&mut datas, &mut imu);
+        scope_1.set_low();
+
+        match res {
+            Ok(()) => {}
+            Err(ReadErr::Err(_e)) => todo!(),
+            Err(ReadErr::UnexpectedEnd) => {
+                defmt::error!("UNEXPECTED");
+                continue;
+            }
+            Err(ReadErr::WrongPat) => {
+                defmt::error!("WRONG PAT");
+                continue;
+            }
+        }
+        scope_2.set_low();
+
+        // Publish data
+        _ = STACK.broadcast_topic::<DataTopic>(&datas, None);
+        scope_3.set_low();
+    }
+}
+
+enum ReadErr<E> {
+    Err(E),
+    UnexpectedEnd,
+    WrongPat,
+}
+
+impl<E> From<E> for ReadErr<E> {
+    fn from(value: E) -> Self {
+        Self::Err(value)
+    }
+}
+
+fn take_one<T: SpiDevice>(
+    acc: &mut Acc<T>,
+    exp_pat: u8,
+    is_last: bool,
+) -> Result<i16, ReadErr<T::Error>> {
+    let [remain_l, remain_h, pat, _unk2, data, datb] = acc.read_one_fifo_with_bits()?;
+    // defmt::info!("r:{=u8}, ep:{=u8}, ap:{=u8}, il:{=bool}", remain, exp_pat, pat, is_last);
+    let remain = u16::from_le_bytes([remain_l, remain_h & 0b0000_0111]);
+    if !is_last && remain <= 1 {
+        return Err(ReadErr::UnexpectedEnd);
+    }
+    if exp_pat != pat {
+        return Err(ReadErr::WrongPat);
+    }
+    let dat = i16::from_le_bytes([data, datb]);
+    Ok(dat)
+}
+
+fn filler<T: SpiDevice>(datas: &mut Datas, acc: &mut Acc<T>) -> Result<(), ReadErr<T::Error>> {
+    datas.mcu_timestamp = Instant::now().as_micros();
+    let _len = datas.inner.len();
+    let mut first = Some(loop {
+        let v = take_one(acc, 0, false);
+        match v {
+            Ok(v) => break v,
+            Err(ReadErr::WrongPat) => continue,
+            Err(e) => return Err(e),
+        }
+    });
+    for data in datas.inner.iter_mut() {
+        data.gyro_p = if let Some(v) = first.take() {
+            v
+        } else {
+            take_one(acc, 0, false)?
+        };
+        data.gyro_r = take_one(acc, 1, false)?;
+        data.gyro_y = take_one(acc, 2, false)?;
+        data.accl_x = take_one(acc, 3, false)?;
+        data.accl_y = take_one(acc, 4, false)?;
+        data.accl_z = take_one(acc, 5, false)?;
+        let ts0 = take_one(acc, 6, false)?;
+        let ts1 = take_one(acc, 7, false)?;
+        let _ts2 = take_one(acc, 8, true)?;
+        let [ts00, ts01] = ts0.to_le_bytes();
+        let [_ts10, ts11] = ts1.to_le_bytes();
+        data.imu_timestamp = u32::from_le_bytes([ts11, ts00, ts01, 0]);
+    }
+    Ok(())
 }
 
 topic!(YeetTopic, u64, "topic/yeet");
