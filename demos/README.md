@@ -8,10 +8,13 @@ Currently, there are demos for:
 
 * `std` - meant to run on typical desktop platforms (win/mac/linux)
 * `esp32c6` - Applications for the ESP32-C6 platform, typically using the `ESP32-C6-DevKitC-1`
+* `rp2350` - Applications for the RP2040 platform, typically using a `Pico2` development board, with or without a debugger.
 * `rp2040` - Applications for the RP2040 platform, typically using a `Pico` development board, with or without a debugger.
 * `nrf52840` - Applications for the `nRF52840` platform, typically using an `nRF52840-DK`
 
-## Working Demo Combinations
+## End to End Demos
+
+The following are particularly notable demos:
 
 ### USB
 
@@ -22,10 +25,25 @@ workspaces for these are
 - `std/ergot-nusb-router`
 - `rp2040/rp2040-eusb` / `rp2350/rp2350-eusb` / `nrf52840/nrf52840-eusb`
 
-### Tilt
+### "Tilt App"
 
-The tilt project is a demo to measure some IMU data and send it over the
-network, the workspaces for this is
+![A 3d render of a circuit board](./tilt-blink-board.png)
 
-- `std/tilt-app`
-- `rp2350/rp2350-tilt`
+The "Tilt App" demo consists of three parts:
+
+* The [`rp2350-tilt`] firmware project, running on an RP2350
+* The [`tilt-app`] host project, running on a PC
+* The [`shared-icd`] library crate, used by both the firmware and PC projects
+
+[`rp2350-tilt`]: ./rp2350/rp2350-tilt/README.md
+[`tilt-app`]: ./std/tilt-app/README.md
+[`shared-icd`]: ./shared-icd/README.md
+
+The board has an LSM6DS3TR accelerometer + gyroscope, eight PWM output channels, and
+an RP2350. This demo has the firmware stream the accelerometer and gyroscope data at
+a sample rate of 6.66k samples per second over USB, and also listens for commands to
+set the PWM duty cycle of each of the eight channels.
+
+This example is intended to cover the case where an embedded linux system may offload
+real-time or i/o tasks to a microcontroller to do things like control a quadrotor
+aircraft.
