@@ -19,9 +19,7 @@ use ergot::{
     endpoint,
     exports::bbq2::{prod_cons::framed::FramedConsumer, traits::coordination::cs::CsCoord},
     toolkits::embassy_usb_v0_5 as kit,
-    topic,
-    well_known::ErgotPingEndpoint,
-    Address,
+    topic, Address,
 };
 use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -139,18 +137,7 @@ topic!(YeetTopic, u64, "topic/yeet");
 
 #[task]
 async fn pingserver() {
-    let server = STACK.stack_bounded_endpoint_server::<ErgotPingEndpoint, 4>(None);
-    let server = pin!(server);
-    let mut server_hdl = server.attach();
-    loop {
-        server_hdl
-            .serve_blocking(|req: &u32| {
-                info!("Serving ping {=u32}", req);
-                *req
-            })
-            .await
-            .unwrap();
-    }
+    STACK.services().ping_handler::<4>().await;
 }
 
 #[task]
