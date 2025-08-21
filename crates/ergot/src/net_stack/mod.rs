@@ -18,19 +18,19 @@
 //! is used both to allow sharing of the inner contents, but also to allow
 //! `Drop` impls to remove themselves from the stack in a blocking manner.
 
-use core::{fmt::Arguments, ops::Deref, pin::pin, ptr::NonNull};
+use core::{fmt::Arguments, ops::Deref, ptr::NonNull};
 
 use cordyceps::List;
+use endpoints::Endpoints;
 use mutex::{BlockingMutex, ConstInit, ScopedRawMutex};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
+use topics::Topics;
 
 use crate::{
-    Address, AnyAllAppendix, DEFAULT_TTL, FrameKind, Header, Key, ProtocolError,
+    Header, ProtocolError,
     fmtlog::{ErgotFmtTx, Level},
     interface_manager::{self, InterfaceSendError, Profile},
-    nash::NameHash,
-    socket::{HeaderMessage, SocketHeader, SocketSendError},
-    traits::{Endpoint, Topic},
+    socket::{SocketHeader, SocketSendError},
     well_known::ErgotFmtTxTopic,
 };
 
@@ -43,6 +43,8 @@ pub mod services;
 pub use arc::ArcNetStack;
 use inner::NetStackInner;
 pub use services::Services;
+pub mod endpoints;
+pub mod topics;
 
 /// The Ergot Netstack
 pub struct NetStack<R: ScopedRawMutex, P: Profile> {
@@ -275,295 +277,11 @@ where
     }
 }
 
-// Ergot Beep Boop AJMAJM
 impl<R, P> NetStack<R, P>
 where
     R: ScopedRawMutex,
     P: Profile,
 {
-    /// Perform an [`Endpoint`] Request, and await Response.
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// # use mutex::raw_impls::cs::CriticalSectionRawMutex as CSRMutex;
-    /// # use ergot::NetStack;
-    /// # use ergot::interface_manager::profiles::null::Null;
-    /// use ergot::socket::endpoint::std_bounded::Server;
-    /// use ergot::Address;
-    /// // Define an example endpoint
-    /// ergot::endpoint!(Example, u32, i32, "pathho");
-    ///
-    /// static STACK: NetStack<CSRMutex, Null> = NetStack::new();
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     // (not shown: starting an `Example` service...)
-    ///     # let jhdl = tokio::task::spawn(async {
-    ///     #     println!("Serve!");
-    ///     #     let srv = STACK.std_bounded_endpoint_server::<Example>(16, None);
-    ///     #     let srv = core::pin::pin!(srv);
-    ///     #     let mut hdl = srv.attach();
-    ///     #     hdl.serve(async |p| *p as i32).await.unwrap();
-    ///     #     println!("Served!");
-    ///     # });
-    ///     # // TODO: let the server attach first
-    ///     # tokio::task::yield_now().await;
-    ///     # tokio::time::sleep(core::time::Duration::from_millis(50)).await;
-    ///     // Make a ping request to local
-    ///     let res = STACK.req_resp::<Example>(
-    ///         Address::unknown(),
-    ///         &42u32,
-    ///         None,
-    ///     ).await;
-    ///     assert_eq!(res, Ok(42i32));
-    ///     # jhdl.await.unwrap();
-    /// }
-    /// ```
-    pub async fn req_resp<E>(
-        &self,
-        dst: Address,
-        req: &E::Request,
-        name: Option<&str>,
-    ) -> Result<E::Response, ReqRespError>
-    where
-        E: Endpoint,
-        E::Request: Serialize + Clone + DeserializeOwned + 'static,
-        E::Response: Serialize + Clone + DeserializeOwned + 'static,
-    {
-        let resp = self.req_resp_full::<E>(dst, req, name).await?;
-        Ok(resp.t)
-    }
-
-    /// Same as [`Self::req_resp`], but also returns the full message with header
-    pub async fn req_resp_full<E>(
-        &self,
-        dst: Address,
-        req: &E::Request,
-        name: Option<&str>,
-    ) -> Result<HeaderMessage<E::Response>, ReqRespError>
-    where
-        E: Endpoint,
-        E::Request: Serialize + Clone + DeserializeOwned + 'static,
-        E::Response: Serialize + Clone + DeserializeOwned + 'static,
-    {
-        // Response doesn't need a name because we will reply back.
-        //
-        // We can also use a "single"/oneshot response because we know
-        // this request will get exactly one response.
-        let resp_sock = self.stack_single_endpoint_client::<E>();
-        let resp_sock = pin!(resp_sock);
-        let mut resp_hdl = resp_sock.attach();
-
-        // If the destination is wildcard, include the any_all appendix to the
-        // header
-        let any_all = match dst.port_id {
-            0 => Some(AnyAllAppendix {
-                key: Key(E::REQ_KEY.to_bytes()),
-                nash: name.map(NameHash::new),
-            }),
-            255 => {
-                return Err(ReqRespError::NoBroadcast);
-            }
-            _ => None,
-        };
-
-        let hdr = Header {
-            src: Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: resp_hdl.port(),
-            },
-            dst,
-            any_all,
-            seq_no: None,
-            kind: FrameKind::ENDPOINT_REQ,
-            ttl: DEFAULT_TTL,
-        };
-        self.send_ty(&hdr, req).map_err(ReqRespError::Local)?;
-        // TODO: assert seq nos match somewhere? do we NEED seq nos if we have
-        // port ids now?
-        let resp = resp_hdl.recv().await;
-        match resp {
-            Ok(msg) => Ok(msg),
-            Err(e) => Err(ReqRespError::Remote(e.t)),
-        }
-    }
-
-    pub fn stack_single_endpoint_client<E: Endpoint>(
-        &self,
-    ) -> crate::socket::endpoint::single::Client<E, &'_ Self>
-    where
-        E::Request: Serialize + DeserializeOwned + Clone,
-        E::Response: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::endpoint::single::Client::new(self, None)
-    }
-
-    pub fn stack_single_endpoint_server<E: Endpoint>(
-        &self,
-        name: Option<&str>,
-    ) -> crate::socket::endpoint::single::Server<E, &'_ Self>
-    where
-        E::Request: Serialize + DeserializeOwned + Clone,
-        E::Response: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::endpoint::single::Server::new(self, name)
-    }
-
-    pub fn stack_bounded_endpoint_server<E: Endpoint, const N: usize>(
-        &self,
-        name: Option<&str>,
-    ) -> crate::socket::endpoint::stack_vec::Server<E, &'_ Self, N>
-    where
-        E::Request: Serialize + DeserializeOwned + Clone,
-        E::Response: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::endpoint::stack_vec::Server::new(self, name)
-    }
-
-    #[cfg(feature = "tokio-std")]
-    pub fn std_bounded_endpoint_server<E: Endpoint>(
-        &self,
-        bound: usize,
-        name: Option<&str>,
-    ) -> crate::socket::endpoint::std_bounded::Server<E, &'_ Self>
-    where
-        E::Request: Serialize + DeserializeOwned + Clone,
-        E::Response: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::endpoint::std_bounded::Server::new(self, bound, name)
-    }
-
-    pub fn stack_single_topic_receiver<T>(
-        &self,
-        name: Option<&str>,
-    ) -> crate::socket::topic::single::Receiver<T, &'_ Self>
-    where
-        T: Topic,
-        T::Message: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::topic::single::Receiver::new(self, name)
-    }
-
-    pub fn stack_bounded_topic_receiver<T, const N: usize>(
-        &self,
-        name: Option<&str>,
-    ) -> crate::socket::topic::stack_vec::Receiver<T, &'_ Self, N>
-    where
-        T: Topic,
-        T::Message: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::topic::stack_vec::Receiver::new(self, name)
-    }
-
-    #[cfg(feature = "tokio-std")]
-    pub fn std_bounded_topic_receiver<T>(
-        &self,
-        bound: usize,
-        name: Option<&str>,
-    ) -> crate::socket::topic::std_bounded::Receiver<T, &'_ Self>
-    where
-        T: Topic,
-        T::Message: Serialize + DeserializeOwned + Clone,
-    {
-        crate::socket::topic::std_bounded::Receiver::new(self, bound, name)
-    }
-
-    #[cfg(feature = "tokio-std")]
-    pub fn std_borrowed_topic_receiver<T>(
-        &self,
-        bound: usize,
-        name: Option<&str>,
-        mtu: u16,
-    ) -> crate::socket::topic::stack_bor::Receiver<
-        crate::interface_manager::utils::std::StdQueue,
-        T,
-        &Self,
-    >
-    where
-        T: Topic,
-        T::Message: Serialize + Sized,
-    {
-        let queue = crate::interface_manager::utils::std::new_std_queue(bound);
-        crate::socket::topic::stack_bor::Receiver::new(self, queue, mtu, name)
-    }
-
-    /// Send a broadcast message for the topic `T`.
-    ///
-    /// This message will be sent to all matching local socket listeners, as well
-    /// as on all interfaces, to be repeated outwards, in a "flood" style.
-    pub fn broadcast_topic<T>(
-        &self,
-        msg: &T::Message,
-        name: Option<&str>,
-    ) -> Result<(), NetStackSendError>
-    where
-        T: Topic,
-        T::Message: Serialize + Clone + DeserializeOwned + 'static,
-    {
-        let hdr = Header {
-            src: Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: 0,
-            },
-            dst: Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: 255,
-            },
-            any_all: Some(AnyAllAppendix {
-                key: Key(T::TOPIC_KEY.to_bytes()),
-                nash: name.map(NameHash::new),
-            }),
-            seq_no: None,
-            kind: FrameKind::TOPIC_MSG,
-            ttl: DEFAULT_TTL,
-        };
-        self.send_ty(&hdr, msg)?;
-        Ok(())
-    }
-
-    /// Send a broadcast message for the topic `T`.
-    ///
-    /// This message will be sent to all matching local socket listeners, as well
-    /// as on all interfaces, to be repeated outwards, in a "flood" style.
-    ///
-    /// The same as [Self::broadcast_topic], but accepts messages with borrowed contents.
-    /// This may be less efficient when delivering to local sockets.
-    pub fn broadcast_topic_bor<T>(
-        &self,
-        msg: &T::Message,
-        name: Option<&str>,
-    ) -> Result<(), NetStackSendError>
-    where
-        T: Topic + Sized,
-        T::Message: Serialize + Sized,
-    {
-        let hdr = Header {
-            src: Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: 0,
-            },
-            dst: Address {
-                network_id: 0,
-                node_id: 0,
-                port_id: 255,
-            },
-            any_all: Some(AnyAllAppendix {
-                key: Key(T::TOPIC_KEY.to_bytes()),
-                nash: name.map(NameHash::new),
-            }),
-            seq_no: None,
-            kind: FrameKind::TOPIC_MSG,
-            ttl: DEFAULT_TTL,
-        };
-        self.send_bor(&hdr, msg)?;
-        Ok(())
-    }
-
     /// Send a trace-level formatted message to the [`ErgotFmtTxTopic`] as a broadcast topic message
     ///
     /// You can use [`crate::fmt!`] or [`core::format_args!`] to create the value passed to this function
@@ -605,11 +323,21 @@ where
     }
 
     fn level_fmt(&self, level: Level, args: &Arguments<'_>) {
-        _ = self.broadcast_topic_bor::<ErgotFmtTxTopic>(&ErgotFmtTx { level, inner: args }, None);
+        _ = self
+            .topics()
+            .broadcast_borrowed::<ErgotFmtTxTopic>(&ErgotFmtTx { level, inner: args }, None);
     }
 
     pub fn services(&self) -> Services<&Self> {
         Services { inner: self }
+    }
+
+    pub fn endpoints(&self) -> Endpoints<&Self> {
+        Endpoints { inner: self }
+    }
+
+    pub fn topics(&self) -> Topics<&Self> {
+        Topics { inner: self }
     }
 }
 

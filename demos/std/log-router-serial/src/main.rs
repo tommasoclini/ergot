@@ -45,7 +45,7 @@ async fn ping_all(stack: RouterStack) {
         for net in nets {
             let pg = ctr;
             ctr = ctr.wrapping_add(1);
-            let rr = stack.req_resp::<ErgotPingEndpoint>(
+            let rr = stack.endpoints().request::<ErgotPingEndpoint>(
                 Address {
                     network_id: net,
                     node_id: 2,
@@ -65,7 +65,9 @@ async fn ping_all(stack: RouterStack) {
 }
 
 async fn log_collect(stack: RouterStack) {
-    let subber = stack.std_bounded_topic_receiver::<ErgotFmtRxOwnedTopic>(64, None);
+    let subber = stack
+        .topics()
+        .heap_bounded_receiver::<ErgotFmtRxOwnedTopic>(64, None);
     let subber = pin!(subber);
     let mut hdl = subber.subscribe();
 

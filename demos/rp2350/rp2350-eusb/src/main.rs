@@ -121,15 +121,14 @@ async fn main(spawner: Spawner) {
     ]));
 
     let mut ticker = Ticker::every(Duration::from_millis(500));
+    let client = STACK
+        .endpoints()
+        .client::<LedEndpoint>(Address::unknown(), Some("led"));
     loop {
         ticker.next().await;
-        let _ = STACK
-            .req_resp::<LedEndpoint>(Address::unknown(), &true, Some("led"))
-            .await;
+        let _ = client.request(&true).await;
         ticker.next().await;
-        let _ = STACK
-            .req_resp::<LedEndpoint>(Address::unknown(), &false, Some("led"))
-            .await;
+        let _ = client.request(&false).await;
     }
 }
 
@@ -147,7 +146,7 @@ async fn yeeter() {
     loop {
         Timer::after(Duration::from_secs(5)).await;
         warn!("Sending broadcast message");
-        let _ = STACK.broadcast_topic::<YeetTopic>(&ctr, None);
+        let _ = STACK.topics().broadcast::<YeetTopic>(&ctr, None);
         ctr += 1;
     }
 }
@@ -179,7 +178,9 @@ async fn run_tx(
 
 #[task]
 async fn led_server(mut leds: [Output<'static>; 8]) {
-    let socket = STACK.stack_bounded_endpoint_server::<LedEndpoint, 2>(Some("led"));
+    let socket = STACK
+        .endpoints()
+        .bounded_server::<LedEndpoint, 2>(Some("led"));
     let socket = pin!(socket);
     let mut hdl = socket.attach();
 
