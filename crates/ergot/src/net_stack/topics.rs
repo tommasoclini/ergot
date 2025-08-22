@@ -77,11 +77,24 @@ impl<NS: NetStackHandle> Topics<NS> {
         T: Topic,
         T::Message: Serialize + Clone + DeserializeOwned + 'static,
     {
+        self.broadcast_with_src_port::<T>(msg, name, 0)
+    }
+
+    pub fn broadcast_with_src_port<T>(
+        self,
+        msg: &T::Message,
+        name: Option<&str>,
+        port: u8,
+    ) -> Result<(), NetStackSendError>
+    where
+        T: Topic,
+        T::Message: Serialize + Clone + DeserializeOwned + 'static,
+    {
         let hdr = Header {
             src: Address {
                 network_id: 0,
                 node_id: 0,
-                port_id: 0,
+                port_id: port,
             },
             dst: Address {
                 network_id: 0,
@@ -92,6 +105,31 @@ impl<NS: NetStackHandle> Topics<NS> {
                 key: Key(T::TOPIC_KEY.to_bytes()),
                 nash: name.map(NameHash::new),
             }),
+            seq_no: None,
+            kind: FrameKind::TOPIC_MSG,
+            ttl: DEFAULT_TTL,
+        };
+        let stack = self.inner.stack();
+        stack.send_ty(&hdr, msg)?;
+        Ok(())
+    }
+
+    /// Send a unicast message for the topic `T`.
+    ///
+    /// This message will be sent directly to the destination
+    pub fn unicast<T>(self, dest: Address, msg: &T::Message) -> Result<(), NetStackSendError>
+    where
+        T: Topic,
+        T::Message: Serialize + Clone + DeserializeOwned + 'static,
+    {
+        let hdr = Header {
+            src: Address {
+                network_id: 0,
+                node_id: 0,
+                port_id: 0,
+            },
+            dst: dest,
+            any_all: None,
             seq_no: None,
             kind: FrameKind::TOPIC_MSG,
             ttl: DEFAULT_TTL,
@@ -132,6 +170,38 @@ impl<NS: NetStackHandle> Topics<NS> {
                 key: Key(T::TOPIC_KEY.to_bytes()),
                 nash: name.map(NameHash::new),
             }),
+            seq_no: None,
+            kind: FrameKind::TOPIC_MSG,
+            ttl: DEFAULT_TTL,
+        };
+        let stack = self.inner.stack();
+        stack.send_bor(&hdr, msg)?;
+        Ok(())
+    }
+
+    /// Send a unicast message for the topic `T`.
+    ///
+    /// This message will be sent directly to the destination
+    ///
+    /// The same as [Self::broadcast_topic], but accepts messages with borrowed contents.
+    /// This may be less efficient when delivering to local sockets.
+    pub fn unicast_borrowed<T>(
+        self,
+        dest: Address,
+        msg: &T::Message,
+    ) -> Result<(), NetStackSendError>
+    where
+        T: Topic + Sized,
+        T::Message: Serialize + Sized,
+    {
+        let hdr = Header {
+            src: Address {
+                network_id: 0,
+                node_id: 0,
+                port_id: 0,
+            },
+            dst: dest,
+            any_all: None,
             seq_no: None,
             kind: FrameKind::TOPIC_MSG,
             ttl: DEFAULT_TTL,

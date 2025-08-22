@@ -43,6 +43,7 @@ pub mod services;
 pub use arc::ArcNetStack;
 use inner::NetStackInner;
 pub use services::Services;
+pub mod discovery;
 pub mod endpoints;
 pub mod topics;
 
