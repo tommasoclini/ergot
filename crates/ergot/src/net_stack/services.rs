@@ -1,5 +1,8 @@
 #[cfg(feature = "tokio-std")]
-use crate::fmtlog::ErgotFmtRxOwned;
+use crate::{
+    fmtlog::ErgotFmtRxOwned, net_stack::topics::Topics, socket::HeaderMessage,
+    well_known::ErgotFmtRxOwnedTopic,
+};
 use crate::{
     net_stack::{NetStackHandle, endpoints::Endpoints},
     well_known::ErgotPingEndpoint,
@@ -26,16 +29,14 @@ impl<NS: NetStackHandle> Services<NS> {
     }
 
     #[cfg(feature = "tokio-std")]
-    pub async fn generic_log_handler<const D: usize, F>(&self, f: F) -> !
+    pub async fn generic_log_handler<F>(&self, depth: usize, f: F) -> !
     where
-        F: Fn(crate::socket::HeaderMessage<ErgotFmtRxOwned>),
+        F: Fn(HeaderMessage<ErgotFmtRxOwned>),
     {
-        use crate::{net_stack::topics::Topics, well_known::ErgotFmtRxOwnedTopic};
-
         let subber = Topics {
             inner: self.inner.clone(),
         }
-        .heap_bounded_receiver::<ErgotFmtRxOwnedTopic>(64, None);
+        .heap_bounded_receiver::<ErgotFmtRxOwnedTopic>(depth, None);
 
         let subber = pin!(subber);
         let mut hdl = subber.subscribe();
@@ -46,8 +47,8 @@ impl<NS: NetStackHandle> Services<NS> {
     }
 
     #[cfg(feature = "tokio-std")]
-    pub async fn default_stdout_log_handler<const D: usize>(&self) -> ! {
-        self.generic_log_handler::<D, _>(|msg| {
+    pub async fn default_stdout_log_handler(&self, depth: usize) -> ! {
+        self.generic_log_handler(depth, |msg| {
             println!(
                 "({}.{}:{}) {:?}: {}",
                 msg.hdr.src.network_id,

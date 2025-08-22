@@ -66,5 +66,5 @@ async fn ping_all(stack: RouterStack) {
 }
 
 async fn log_collect(stack: RouterStack) {
-    stack.services().default_stdout_log_handler::<64>().await
+    stack.services().default_stdout_log_handler(64).await
 }
