@@ -6,7 +6,7 @@
 #   work in miri
 #
 # TODO: Can we eliminate some of these limitations for testing?
-MIRIFLAGS=-Zmiri-disable-isolation \
+MIRIFLAGS=-Zmiri-disable-isolation RUSTFLAGS=-Zrandomize-layout \
     cargo +nightly miri test \
     --target x86_64-unknown-linux-gnu \
     --features=tokio-std
