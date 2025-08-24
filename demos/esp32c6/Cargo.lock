@@ -532,7 +532,7 @@ dependencies = [
  "defmt 1.0.1",
  "embassy-time",
  "embedded-io-async",
- "heapless 0.8.0",
+ "heapless 0.9.1",
  "log",
  "maitake-sync",
  "mutex",
@@ -945,6 +945,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapless"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1edcd5a338e64688fbdcb7531a846cfd3476a54784dcb918a0844682bc7ada5"
+dependencies = [
+ "defmt 1.0.1",
+ "hash32 0.3.1",
+ "serde",
+ "stable_deref_trait",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,10 +1274,11 @@ dependencies = [
 
 [[package]]
 name = "postcard-schema"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5a13d8b1f8b3473b45c2c779b97c18c260ac6458eb045d4be75df8087784400"
+checksum = "9475666d89f42231a0a57da32d5f6ca7f9b5cd4c335ea1fe8f3278215b7a21ff"
 dependencies = [
+ "heapless 0.9.1",
  "postcard-derive",
  "serde",
 ]
