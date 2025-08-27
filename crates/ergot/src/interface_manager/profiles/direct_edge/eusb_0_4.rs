@@ -6,8 +6,9 @@
 use crate::{
     Header,
     interface_manager::{
-        InterfaceState, Profile, interface_impls::embassy_usb::EmbassyInterface,
-        profiles::direct_edge::DirectEdge,
+        InterfaceState, Profile,
+        interface_impls::embassy_usb::EmbassyInterface,
+        profiles::direct_edge::{DirectEdge, EDGE_NODE_ID},
     },
     net_stack::NetStackHandle,
     wire_frames::de_frame,
@@ -179,6 +180,7 @@ where
                     (),
                     InterfaceState::Active {
                         net_id: frame.hdr.dst.network_id,
+                        node_id: EDGE_NODE_ID,
                     },
                 );
             });
@@ -190,13 +192,13 @@ where
         // local packet.
         //
         // TODO: accept any packet if we don't have a net_id yet?
-        if let Some(net) = self.net_id.as_ref() {
-            if frame.hdr.src.network_id == 0 {
-                assert_ne!(frame.hdr.src.node_id, 0, "we got a local packet remotely?");
-                assert_ne!(frame.hdr.src.node_id, 2, "someone is pretending to be us?");
+        if let Some(net) = self.net_id.as_ref()
+            && frame.hdr.src.network_id == 0
+        {
+            assert_ne!(frame.hdr.src.node_id, 0, "we got a local packet remotely?");
+            assert_ne!(frame.hdr.src.node_id, 2, "someone is pretending to be us?");
 
-                frame.hdr.src.network_id = *net;
-            }
+            frame.hdr.src.network_id = *net;
         }
 
         // TODO: if the destination IS self.net_id, we could rewrite the
