@@ -1,10 +1,11 @@
-use std::{sync::mpsc, time::Instant};
+use std::time::Instant;
 
 use eframe::egui;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
+use ergot::socket::topic::std_bounded::BoxedReceiverHandle;
 
-use crate::datastream::{TiltDataManager, run_stream};
-use shared_icd::tilt::Data;
+use crate::datastream::TiltDataManager;
+use shared_icd::tilt::{Data, DataTopic};
 
 #[derive(Clone, Copy, PartialEq)]
 enum StreamMode {
@@ -12,10 +13,15 @@ enum StreamMode {
     Ergot,
 }
 
+// Wrapper struct that stores a single data point AND the MCU reported time
+pub struct DataTimed {
+    pub data: Data,
+    pub time: u64,
+}
+
 pub struct StreamPlottingApp {
     data: TiltDataManager,
-    rx: mpsc::Receiver<Data>,
-    stack: crate::RouterStack,
+    rcvr: BoxedReceiverHandle<DataTopic, crate::RouterStack>,
     stream_mode: StreamMode,
     frame_time: Instant,
     frame_count: u16,
@@ -27,15 +33,14 @@ pub struct StreamPlottingApp {
 impl StreamPlottingApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, stack: crate::RouterStack) -> Self {
         let stream_mode = StreamMode::Ergot;
-        let (tx, rx) = mpsc::channel();
-        let tx = tx.clone();
         let mut data = TiltDataManager::new();
         data.points_to_plot = 600;
-        run_stream(tx, Some(stack.clone()));
+        let rcvr = Box::pin(stack.topics().heap_bounded_receiver::<DataTopic>(128, None));
+        let rcvr = rcvr.subscribe_boxed();
+
         Self {
             data,
-            rx,
-            stack,
+            rcvr,
             stream_mode,
             frame_time: Instant::now(),
             frame_count: 0,
@@ -46,21 +51,8 @@ impl StreamPlottingApp {
     }
 
     fn create_data(&mut self) {
-        let (tx, rx) = mpsc::channel();
-        let tx = tx.clone();
         let mut data = TiltDataManager::new();
         data.points_to_plot = 2_000;
-
-        match self.stream_mode {
-            StreamMode::Simulated => {
-                run_stream(tx, None);
-            }
-            StreamMode::Ergot => {
-                run_stream(tx, Some(self.stack.clone()));
-            }
-        }
-
-        self.rx = rx;
         self.data = data;
     }
 }
@@ -68,9 +60,21 @@ impl StreamPlottingApp {
 impl eframe::App for StreamPlottingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            while let Ok(dt) = self.rx.try_recv() {
-                self.data.add_datapoint(dt);
-                self.dpts_sum += 1;
+            // Drain any pending messages
+            while let Some(msg) = self.rcvr.try_recv() {
+                // If we are in simulated mode, we ONLY listen to messages from the local
+                // machine.
+                //
+                // If we are in "Ergot" mode, we ONLY listen to messages NOT from the local
+                // machine.
+                match (self.stream_mode, msg.hdr.src.net_node_any()) {
+                    (StreamMode::Simulated, true) | (StreamMode::Ergot, false) => {
+                        self.data
+                            .add_datapoint(msg.t.inner[3].clone(), msg.t.mcu_timestamp);
+                        self.dpts_sum += 1;
+                    }
+                    _ => {}
+                }
             }
             ui.heading("Gyro data");
 

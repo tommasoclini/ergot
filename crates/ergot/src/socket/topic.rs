@@ -14,8 +14,13 @@ use crate::{
 
 macro_rules! topic_receiver {
     ($sto: ty, $($arr: ident)?) => {
+        pub type BoxedReceiverHandle<T, NS, $(const $arr: usize)?> = ReceiverHandle<'static, T, NS, $($arr)?>;
+
         /// A receiver of [`Topic`] messages.
+        //
+        // NOTE: Load bearing repr(transparent)!
         #[pin_project::pin_project]
+        #[repr(transparent)]
         pub struct Receiver<T, NS, $(const $arr: usize)?>
         where
             T: Topic,
@@ -51,6 +56,16 @@ macro_rules! topic_receiver {
                 ReceiverHandle { hdl }
             }
 
+            #[cfg(feature = "std")]
+            pub fn subscribe_boxed(self: Pin<Box<Self>>) -> BoxedReceiverHandle<T, NS, $($arr)?> {
+                // SAFETY: Receiver is repr(transparent) with the contained topic::raw::Receiver.
+                let self_transparent: Pin<Box<$crate::socket::topic::raw::Receiver<$sto, T, NS>>> = unsafe {
+                    core::mem::transmute(self)
+                };
+                let hdl: $crate::socket::topic::raw::ReceiverHandle<_, T, NS> = self_transparent.subscribe_boxed();
+                ReceiverHandle { hdl }
+            }
+
             /// Attach to the [`NetStack`](crate::net_stack::NetStack), and obtain a [`ReceiverHandle`]
             pub fn subscribe_unicast<'a>(self: Pin<&'a mut Self>) -> ReceiverHandle<'a, T, NS, $($arr)?> {
                 let this = self.project();
@@ -78,6 +93,10 @@ macro_rules! topic_receiver {
             pub async fn recv(&mut self) -> base::socket::HeaderMessage<T::Message> {
                 self.hdl.recv().await
             }
+
+            pub fn try_recv(&mut self) -> Option<base::socket::HeaderMessage<T::Message>> {
+                self.hdl.try_recv()
+            }
         }
 
     };
@@ -88,7 +107,10 @@ pub mod raw {
     use super::*;
 
     /// A receiver of [`Topic`] messages.
+    //
+    // NOTE: Load bearing repr(transparent)!
     #[pin_project]
+    #[repr(transparent)]
     pub struct Receiver<S, T, NS>
     where
         S: base::socket::raw_owned::Storage<Response<T::Message>>,
@@ -145,6 +167,17 @@ pub mod raw {
         }
 
         /// Attach and obtain a ReceiverHandle
+        #[cfg(feature = "std")]
+        pub fn subscribe_boxed(self: Pin<Box<Self>>) -> ReceiverHandle<'static, S, T, NS> {
+            // SAFETY: Receiver is repr(transparent) with the contained raw_owned::SocketHdl.
+            let self_transparent: Pin<Box<base::socket::raw_owned::Socket<S, T::Message, NS>>> =
+                unsafe { core::mem::transmute(self) };
+            let hdl: base::socket::raw_owned::SocketHdl<S, T::Message, NS> =
+                self_transparent.attach_broadcast_boxed();
+            ReceiverHandle { hdl }
+        }
+
+        /// Attach and obtain a ReceiverHandle
         pub fn subscribe_unicast<'a>(self: Pin<&'a mut Self>) -> ReceiverHandle<'a, S, T, NS> {
             let this = self.project();
             let hdl: base::socket::raw_owned::SocketHdl<'_, S, T::Message, NS> = this.sock.attach();
@@ -175,6 +208,20 @@ pub mod raw {
                 // TODO: do anything with errors? If not - we can use a different vtable
                 if let Ok(msg) = res {
                     return msg;
+                }
+            }
+        }
+
+        /// See if there is a message available
+        pub fn try_recv(&mut self) -> Option<base::socket::HeaderMessage<T::Message>> {
+            loop {
+                // If there is NO message ready, then return None now
+                let res = self.hdl.try_recv()?;
+
+                // If there is a GOOD message ready, return Some now. Otherwise,
+                // continue until we get a good message or there are NO messages ready
+                if let Ok(msg) = res {
+                    return Some(msg);
                 }
             }
         }

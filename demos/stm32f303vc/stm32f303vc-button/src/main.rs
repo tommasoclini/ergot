@@ -51,7 +51,7 @@ impl<'a> Leds<'a> {
         ) -> Option<ButtonEvent> {
             let mut ret = None;
             let _ = hdl.serve(async |x| ret = Some(x.clone())).await;
-            return ret;
+            ret
         }
         let socket = STACK
             .endpoints()

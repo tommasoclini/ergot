@@ -4,7 +4,7 @@ use std::{
 };
 
 use log::{info, warn};
-use stream_plotting::StreamPlottingApp;
+use stream_plotting::{StreamPlottingApp, send_simulated_data};
 
 const MTU: u16 = 1024;
 const OUT_BUFFER_SIZE: usize = 4096;
@@ -23,6 +23,7 @@ async fn main() {
 
     tokio::task::spawn(ping_all(stack.clone()));
     tokio::task::spawn(manage_connections(stack.clone()));
+    tokio::task::spawn(send_simulated_data(stack.clone()));
 
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.min_inner_size = Some(eframe::egui::Vec2 { x: 900., y: 600. }); // empirical

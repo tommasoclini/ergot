@@ -34,6 +34,81 @@ pub trait Storage<T: 'static>: 'static {
     fn try_pop(&mut self) -> Option<T>;
 }
 
+/// SocketPtr represents an equivalent ownership as Pin<&'a mut Socket<S, T, N>>,
+/// however we use it to abstract over `Pin<&mut Socket<S, T, N>>` and
+/// `Pin<Box<Socket<S, T, N>>>`.
+///
+/// This is achieved by having an `on_drop` function, which for borrowed items
+/// is a no-op, but for owned/boxed items acts as a drop.
+struct SocketPtr<'a, S, T, N>
+where
+    S: Storage<Response<T>>,
+    T: Clone + DeserializeOwned + 'static,
+    N: NetStackHandle,
+{
+    ptr: NonNull<Socket<S, T, N>>,
+    on_drop: unsafe fn(NonNull<Socket<S, T, N>>),
+    _pd: PhantomData<Pin<&'a mut Socket<S, T, N>>>,
+}
+
+impl<S, T, N> SocketPtr<'_, S, T, N>
+where
+    S: Storage<Response<T>>,
+    T: Clone + DeserializeOwned + 'static,
+    N: NetStackHandle,
+{
+    pub(crate) fn as_ptr(&self) -> NonNull<Socket<S, T, N>> {
+        self.ptr
+    }
+}
+
+impl<S, T, N> Drop for SocketPtr<'_, S, T, N>
+where
+    S: Storage<Response<T>>,
+    T: Clone + DeserializeOwned + 'static,
+    N: NetStackHandle,
+{
+    fn drop(&mut self) {
+        unsafe { (self.on_drop)(self.ptr) }
+    }
+}
+
+impl<S, T, N> From<Pin<&mut Socket<S, T, N>>> for SocketPtr<'_, S, T, N>
+where
+    S: Storage<Response<T>>,
+    T: Clone + DeserializeOwned + 'static,
+    N: NetStackHandle,
+{
+    fn from(value: Pin<&mut Socket<S, T, N>>) -> Self {
+        let ptr_self: NonNull<Socket<S, T, N>> =
+            NonNull::from(unsafe { value.get_unchecked_mut() });
+        SocketPtr {
+            ptr: ptr_self,
+            on_drop: Socket::<S, T, N>::nop_drop,
+            _pd: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<S, T, N> From<Pin<Box<Socket<S, T, N>>>> for SocketPtr<'static, S, T, N>
+where
+    S: Storage<Response<T>>,
+    T: Clone + DeserializeOwned + 'static,
+    N: NetStackHandle,
+{
+    fn from(value: Pin<Box<Socket<S, T, N>>>) -> Self {
+        let box_self: Box<Socket<S, T, N>> = unsafe { Pin::into_inner_unchecked(value) };
+        let ptr_self: NonNull<Socket<S, T, N>> =
+            unsafe { NonNull::new_unchecked(Box::into_raw(box_self)) };
+        SocketPtr {
+            ptr: ptr_self,
+            on_drop: Socket::<S, T, N>::pin_box_drop,
+            _pd: PhantomData,
+        }
+    }
+}
+
 // Socket
 #[repr(C)]
 pub struct Socket<S, T, N>
@@ -43,7 +118,7 @@ where
     N: NetStackHandle,
 {
     // LOAD BEARING: must be first
-    hdr: SocketHeader,
+    hdr: UnsafeCell<SocketHeader>,
     pub(crate) net: N::Target,
     inner: UnsafeCell<StoreBox<S, Response<T>>>,
 }
@@ -54,8 +129,7 @@ where
     T: Clone + DeserializeOwned + 'static,
     N: NetStackHandle,
 {
-    pub(crate) ptr: NonNull<Socket<S, T, N>>,
-    _lt: PhantomData<Pin<&'a mut Socket<S, T, N>>>,
+    ptr: SocketPtr<'a, S, T, N>,
     port: u8,
 }
 
@@ -84,6 +158,13 @@ where
     T: Clone + DeserializeOwned + 'static,
     N: NetStackHandle,
 {
+    unsafe fn nop_drop(_: NonNull<Self>) {}
+
+    #[cfg(feature = "std")]
+    unsafe fn pin_box_drop(this: NonNull<Self>) {
+        _ = unsafe { Box::from_raw(this.as_ptr()) };
+    }
+
     pub const fn new(
         net: N::Target,
         key: Key,
@@ -92,7 +173,7 @@ where
         name: Option<&str>,
     ) -> Self {
         Self {
-            hdr: SocketHeader {
+            hdr: UnsafeCell::new(SocketHeader {
                 links: Links::new(),
                 vtable: const { &Self::vtable() },
                 port: 0,
@@ -103,34 +184,48 @@ where
                 } else {
                     None
                 },
-            },
+            }),
             inner: UnsafeCell::new(StoreBox::new(sto)),
             net,
         }
     }
 
-    pub fn attach<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, N> {
+    pub fn attach(self: Pin<&mut Self>) -> SocketHdl<'_, S, T, N> {
         let stack = self.net.clone();
-        let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
+        let sp: SocketPtr<'_, S, T, N> = self.into();
+        let ptr_self: NonNull<Self> = sp.as_ptr();
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         let port = unsafe { stack.attach_socket(ptr_erase) };
-        SocketHdl {
-            ptr: ptr_self,
-            _lt: PhantomData,
-            port,
-        }
+        SocketHdl { ptr: sp, port }
     }
 
-    pub fn attach_broadcast<'a>(self: Pin<&'a mut Self>) -> SocketHdl<'a, S, T, N> {
+    #[cfg(feature = "std")]
+    pub fn attach_boxed(self: Pin<Box<Self>>) -> SocketHdl<'static, S, T, N> {
         let stack = self.net.clone();
-        let ptr_self: NonNull<Self> = NonNull::from(unsafe { self.get_unchecked_mut() });
+        let sp: SocketPtr<S, T, N> = self.into();
+        let ptr_self: NonNull<Self> = sp.as_ptr();
+        let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
+        let port = unsafe { stack.attach_socket(ptr_erase) };
+        SocketHdl { ptr: sp, port }
+    }
+
+    pub fn attach_broadcast(self: Pin<&mut Self>) -> SocketHdl<'_, S, T, N> {
+        let stack = self.net.clone();
+        let sp: SocketPtr<'_, S, T, N> = self.into();
+        let ptr_self: NonNull<Self> = sp.as_ptr();
         let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
         unsafe { stack.attach_broadcast_socket(ptr_erase) };
-        SocketHdl {
-            ptr: ptr_self,
-            _lt: PhantomData,
-            port: 255,
-        }
+        SocketHdl { ptr: sp, port: 255 }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn attach_broadcast_boxed(self: Pin<Box<Self>>) -> SocketHdl<'static, S, T, N> {
+        let stack = self.net.clone();
+        let sp: SocketPtr<S, T, N> = self.into();
+        let ptr_self: NonNull<Self> = sp.as_ptr();
+        let ptr_erase: NonNull<SocketHeader> = ptr_self.cast();
+        unsafe { stack.attach_broadcast_socket(ptr_erase) };
+        SocketHdl { ptr: sp, port: 255 }
     }
 
     const fn vtable() -> SocketVTable {
@@ -241,7 +336,18 @@ where
     }
 
     pub fn stack(&self) -> N::Target {
-        unsafe { (*addr_of!((*self.ptr.as_ptr()).net)).clone() }
+        unsafe { (*addr_of!((*self.ptr.as_ptr().as_ptr()).net)).clone() }
+    }
+
+    pub fn try_recv(&mut self) -> Option<Response<T>> {
+        let net: N::Target = self.stack();
+        let f = || {
+            let this_ref: &Socket<S, T, N> = unsafe { self.ptr.as_ptr().as_ref() };
+            let box_ref: &mut StoreBox<S, Response<T>> = unsafe { &mut *this_ref.inner.get() };
+
+            box_ref.sto.try_pop()
+        };
+        unsafe { net.with_lock(f) }
     }
 
     pub fn recv<'b>(&'b mut self) -> Recv<'b, 'a, S, T, N> {
@@ -249,16 +355,28 @@ where
     }
 }
 
-impl<S, T, N> Drop for Socket<S, T, N>
+impl<S, T, N> Drop for SocketHdl<'_, S, T, N>
 where
     S: Storage<Response<T>>,
     T: Clone + DeserializeOwned + 'static,
     N: NetStackHandle,
 {
     fn drop(&mut self) {
+        // SAFETY: the drop of the SocketHdl signifies the end of the pinned relationship
+        // of the socket. At the beginning of drop, we are pinned, and then remove ourselves
+        // from the socket list.
+        //
+        // `detach_socket`is performed with the mutex locked.
+        //
+        // Once we return from this function, the contained `SocketPtr` is dropped, and its
+        // `on_drop` function is called. If this handle was created with a `Pin<&mut Socket>`,
+        // the socket itself will not yet be dropped. If this SocketHdl was created with a
+        // Pin<Box<Socket>>, then that socket will be dropped by the on_drop handler.
         unsafe {
-            let this = NonNull::from(&self.hdr);
-            self.net.detach_socket(this);
+            let net = self.stack();
+            let ptr: *mut SocketHeader = self.ptr.as_ptr().as_ref().hdr.get();
+            let this: NonNull<SocketHeader> = NonNull::new_unchecked(ptr);
+            net.detach_socket(this);
         }
     }
 }
@@ -294,7 +412,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let net: N::Target = self.hdl.stack();
         let f = || {
-            let this_ref: &Socket<S, T, N> = unsafe { self.hdl.ptr.as_ref() };
+            let this_ref: &Socket<S, T, N> = unsafe { self.hdl.ptr.as_ptr().as_ref() };
             let box_ref: &mut StoreBox<S, Response<T>> = unsafe { &mut *this_ref.inner.get() };
 
             if let Some(resp) = box_ref.sto.try_pop() {

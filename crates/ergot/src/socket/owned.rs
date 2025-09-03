@@ -15,6 +15,7 @@
 
 macro_rules! wrapper {
     ($sto: ty, $($arr: ident)?) => {
+        // NOTE: Load bearing repr(transparent)!
         #[repr(transparent)]
         pub struct Socket<T, NS, $(const $arr: usize)?>
         where
@@ -50,6 +51,15 @@ macro_rules! wrapper {
                     = unsafe { self.map_unchecked_mut(|me| &mut me.socket) };
                 SocketHdl {
                     hdl: socket.attach(),
+                }
+            }
+
+            #[cfg(feature = "std")]
+            pub fn attach_boxed(self: std::pin::Pin<Box<Self>>) -> SocketHdl<'static, T, NS, $($arr)?> {
+                // SAFETY: Socket is repr(transparent) with the contained raw_owned::Socket.
+                let box_transparent: std::pin::Pin<Box<$crate::socket::raw_owned::Socket<$sto, T, NS>>> = unsafe { core::mem::transmute(self) };
+                SocketHdl {
+                    hdl: box_transparent.attach_boxed(),
                 }
             }
 
