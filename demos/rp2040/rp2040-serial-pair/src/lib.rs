@@ -121,8 +121,13 @@ impl<Q: BbqHandle + 'static> Profile for PairedUartProfile<Q> {
         self.inner.send(hdr, data)
     }
 
-    fn send_err(&mut self, hdr: &Header, err: ProtocolError) -> Result<(), InterfaceSendError> {
-        self.inner.send_err(hdr, err)
+    fn send_err(
+        &mut self,
+        hdr: &Header,
+        err: ProtocolError,
+        source: Option<Self::InterfaceIdent>,
+    ) -> Result<(), InterfaceSendError> {
+        self.inner.send_err(hdr, err, source)
     }
 
     fn send_raw(
@@ -130,8 +135,9 @@ impl<Q: BbqHandle + 'static> Profile for PairedUartProfile<Q> {
         hdr: &Header,
         hdr_raw: &[u8],
         data: &[u8],
+        source: Self::InterfaceIdent,
     ) -> Result<(), InterfaceSendError> {
-        self.inner.send_raw(hdr, hdr_raw, data)
+        self.inner.send_raw(hdr, hdr_raw, data, source)
     }
 
     fn interface_state(&mut self, ident: Self::InterfaceIdent) -> Option<InterfaceState> {
@@ -281,8 +287,8 @@ where
             let hdr = frame.hdr.clone();
             let hdr: Header = hdr.into();
             let res = match frame.body {
-                Ok(body) => nsh.stack().send_raw(&hdr, frame.hdr_raw, body),
-                Err(e) => nsh.stack().send_err(&hdr, e),
+                Ok(body) => nsh.stack().send_raw(&hdr, frame.hdr_raw, body, ()),
+                Err(e) => nsh.stack().send_err(&hdr, e, Some(())),
             };
             match res {
                 Ok(()) => {}

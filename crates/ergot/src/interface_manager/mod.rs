@@ -55,15 +55,21 @@ pub trait Profile {
     /// The kind of type that is used to identify a single interface.
     /// If a Profile only supports a single interface, this is often the `()` type.
     /// If a Profile supports many interfaces, this could be an enum or integer type.
-    type InterfaceIdent: Clone;
+    type InterfaceIdent: Clone + core::fmt::Debug;
 
     fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError>;
-    fn send_err(&mut self, hdr: &Header, err: ProtocolError) -> Result<(), InterfaceSendError>;
+    fn send_err(
+        &mut self,
+        hdr: &Header,
+        err: ProtocolError,
+        source: Option<Self::InterfaceIdent>,
+    ) -> Result<(), InterfaceSendError>;
     fn send_raw(
         &mut self,
         hdr: &Header,
         hdr_raw: &[u8],
         data: &[u8],
+        source: Self::InterfaceIdent,
     ) -> Result<(), InterfaceSendError>;
 
     fn interface_state(&mut self, ident: Self::InterfaceIdent) -> Option<InterfaceState>;
@@ -113,6 +119,8 @@ pub enum InterfaceSendError {
     AnyPortMissingKey,
     /// TTL has reached the terminal value
     TtlExpired,
+    /// Interface detected that a packet should be routed back to its source
+    RoutingLoop,
 }
 
 /// An error when deregistering an interface
@@ -156,6 +164,7 @@ impl InterfaceSendError {
             InterfaceSendError::PlaceholderOhNo => ProtocolError::ISE_PLACEHOLDER_OH_NO,
             InterfaceSendError::AnyPortMissingKey => ProtocolError::ISE_ANY_PORT_MISSING_KEY,
             InterfaceSendError::TtlExpired => ProtocolError::ISE_TTL_EXPIRED,
+            InterfaceSendError::RoutingLoop => ProtocolError::ISE_ROUTING_LOOP,
         }
     }
 }
