@@ -11,6 +11,8 @@ use crate::{
     socket::{SocketHeader, SocketSendError, SocketVTable, borser},
 };
 
+use super::SocketHeaderIter;
+
 pub(crate) struct NetStackInner<P: Profile> {
     pub(super) sockets: List<SocketHeader>,
     pub(super) profile: P,
@@ -124,7 +126,9 @@ where
                 debug!("Externally routed msg unicast");
                 return Ok(());
             }
-            Err(InterfaceSendError::DestinationLocal) => {
+            // "Destination Local" and "Routing Loop" can both be returned when there is no
+            // interface interest, but are non-fatal.
+            Err(InterfaceSendError::DestinationLocal) | Err(InterfaceSendError::RoutingLoop) => {
                 debug!("No external interest in msg unicast");
             }
             Err(e) => return Err(NetStackSendError::InterfaceSend(e)),
@@ -321,6 +325,16 @@ where
             |skt| Self::send_err_to_socket(skt, err, hdr, seq_no),
             || manager.send_err(hdr, err, source),
         )
+    }
+
+    /// Call the given closure with an iterator over current public sockets
+    pub(super) fn with_sockets<F, U>(&self, f: F) -> U
+    where
+        F: FnOnce(SocketHeaderIter) -> U,
+    {
+        let iter = self.sockets.iter();
+        let iter = SocketHeaderIter { iter };
+        f(iter)
     }
 
     /// Find a specific (e.g. port_id not 0 or 255) destination port matching
