@@ -27,7 +27,7 @@ use serde::Serialize;
 use topics::Topics;
 
 use crate::{
-    Header, ProtocolError,
+    Header, HeaderSeq, ProtocolError,
     fmtlog::{ErgotFmtTx, Level},
     interface_manager::{self, InterfaceSendError, Profile},
     socket::{SocketHeader, SocketSendError},
@@ -209,13 +209,12 @@ where
     /// [`NetStack`].
     pub fn send_raw(
         &self,
-        hdr: &Header,
-        hdr_raw: &[u8],
+        hdr: &HeaderSeq,
         body: &[u8],
         source: P::InterfaceIdent,
     ) -> Result<(), NetStackSendError> {
         self.inner
-            .try_with_lock(|inner| inner.send_raw(hdr, hdr_raw, body, source))
+            .try_with_lock(|inner| inner.send_raw(hdr, body, source))
             .ok_or(NetStackSendError::WouldDeadlock)?
     }
 

@@ -142,8 +142,7 @@ impl<I: Interface> Profile for DirectRouter<I> {
 
     fn send_raw(
         &mut self,
-        hdr: &crate::Header,
-        hdr_raw: &[u8],
+        hdr: &crate::HeaderSeq,
         data: &[u8],
         source: Self::InterfaceIdent,
     ) -> Result<(), InterfaceSendError> {
@@ -164,10 +163,11 @@ impl<I: Interface> Profile for DirectRouter<I> {
                     continue;
                 }
 
+                // For broadcast messages, rewrite the destination address
+                // to the address of the next hop.
                 hdr.dst.network_id = p.net_id;
                 hdr.dst.node_id = EDGE_NODE_ID;
-                // TODO: this is wrong, hdr_raw and header could be out of sync!
-                any_good |= p.edge.send_raw(&hdr, hdr_raw, data).is_ok();
+                any_good |= p.edge.send_raw(&hdr, data).is_ok();
             }
             if any_good {
                 Ok(())
@@ -175,8 +175,9 @@ impl<I: Interface> Profile for DirectRouter<I> {
                 Err(InterfaceSendError::NoRouteToDest)
             }
         } else {
-            let intfc = self.find(&hdr, Some(source))?;
-            intfc.send_raw(&hdr, hdr_raw, data)
+            let nshdr = hdr.clone().into();
+            let intfc = self.find(&nshdr, Some(source))?;
+            intfc.send_raw(&hdr, data)
         }
     }
 
@@ -539,11 +540,11 @@ pub fn process_frame<N>(
         // If the dest is 0, should we rewrite the dest as self.net_id? This
         // is the opposite as above, but I dunno how that will work with responses
         let hdr = frame.hdr.clone();
-        let hdr: Header = hdr.into();
+        let nshdr: Header = hdr.clone().into();
 
         let res = match frame.body {
-            Ok(body) => nsh.stack().send_raw(&hdr, frame.hdr_raw, body, ident),
-            Err(e) => nsh.stack().send_err(&hdr, e, Some(ident)),
+            Ok(body) => nsh.stack().send_raw(&hdr, body, ident),
+            Err(e) => nsh.stack().send_err(&nshdr, e, Some(ident)),
         };
         match res {
             Ok(()) => {}
@@ -562,12 +563,11 @@ mod edge_interface_plus {
     use serde::Serialize;
 
     use crate::{
-        Header, ProtocolError,
+        Header, HeaderSeq, ProtocolError,
         interface_manager::{
             Interface, InterfaceSendError, InterfaceSink, InterfaceState, SetStateError,
             profiles::direct_edge::{CENTRAL_NODE_ID, EDGE_NODE_ID},
         },
-        wire_frames::CommonHeader,
     };
 
     // TODO: call this something like "point to point edge"
@@ -595,7 +595,7 @@ mod edge_interface_plus {
         fn common_send<'b>(
             &'b mut self,
             ihdr: &Header,
-        ) -> Result<(&'b mut I::Sink, CommonHeader), InterfaceSendError> {
+        ) -> Result<(&'b mut I::Sink, HeaderSeq), InterfaceSendError> {
             let net_id = match &self.state {
                 InterfaceState::Down | InterfaceState::Inactive => {
                     return Err(InterfaceSendError::NoRouteToDest);
@@ -636,19 +636,11 @@ mod edge_interface_plus {
             }
 
             // If this message has no seq_no, assign it one
-            let seq_no = hdr.seq_no.unwrap_or_else(|| {
+            let header = hdr.to_headerseq_or_with_seq(|| {
                 let seq_no = self.seq_no;
                 self.seq_no = self.seq_no.wrapping_add(1);
                 seq_no
             });
-
-            let header = CommonHeader {
-                src: hdr.src,
-                dst: hdr.dst,
-                seq_no,
-                kind: hdr.kind,
-                ttl: hdr.ttl,
-            };
             if [0, 255].contains(&hdr.dst.port_id) && ihdr.any_all.is_none() {
                 return Err(InterfaceSendError::AnyPortMissingKey);
             }
@@ -667,7 +659,7 @@ mod edge_interface_plus {
         ) -> Result<(), InterfaceSendError> {
             let (intfc, header) = self.common_send(hdr)?;
 
-            let res = intfc.send_ty(&header, hdr.any_all.as_ref(), data);
+            let res = intfc.send_ty(&header, data);
 
             match res {
                 Ok(()) => Ok(()),
@@ -692,15 +684,12 @@ mod edge_interface_plus {
 
         pub(super) fn send_raw(
             &mut self,
-            hdr: &Header,
-            hdr_raw: &[u8],
+            hdr: &HeaderSeq,
             data: &[u8],
         ) -> Result<(), InterfaceSendError> {
-            let (intfc, header) = self.common_send(hdr)?;
-
-            // TODO: this is wrong, hdr_raw and header could be out of sync if common_send
-            // modified the header!
-            let res = intfc.send_raw(&header, hdr_raw, data);
+            let nshdr: Header = hdr.clone().into();
+            let (intfc, header) = self.common_send(&nshdr)?;
+            let res = intfc.send_raw(&header, data);
 
             match res {
                 Ok(()) => Ok(()),

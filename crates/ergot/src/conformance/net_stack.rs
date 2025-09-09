@@ -103,7 +103,7 @@ pub mod mocks {
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
     use crate::{
-        Header, ProtocolError,
+        Header, HeaderSeq, ProtocolError,
         interface_manager::{InterfaceSendError, InterfaceState, Profile, SetStateError},
         net_stack::ArcNetStack,
     };
@@ -126,8 +126,7 @@ pub mod mocks {
     }
 
     pub struct ExpectedSendRaw {
-        pub hdr: Header,
-        pub hdr_raw: Vec<u8>,
+        pub hdr: HeaderSeq,
         pub body: Vec<u8>,
         pub retval: Result<(), InterfaceSendError>,
     }
@@ -186,8 +185,7 @@ pub mod mocks {
 
         fn send_raw(
             &mut self,
-            _hdr: &Header,
-            _hdr_raw: &[u8],
+            _hdr: &HeaderSeq,
             _data: &[u8],
             _source: Self::InterfaceIdent,
         ) -> Result<(), InterfaceSendError> {

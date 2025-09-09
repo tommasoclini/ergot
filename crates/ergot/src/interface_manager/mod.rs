@@ -34,7 +34,7 @@
 //!
 //! [`NetStack`]: crate::NetStack
 
-use crate::{AnyAllAppendix, Header, ProtocolError, wire_frames::CommonHeader};
+use crate::{Header, HeaderSeq, ProtocolError};
 use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
@@ -123,8 +123,7 @@ pub trait Profile {
     /// This method should only be used for messages that do NOT originate locally
     fn send_raw(
         &mut self,
-        hdr: &Header,
-        hdr_raw: &[u8],
+        hdr: &HeaderSeq,
         data: &[u8],
         source: Self::InterfaceIdent,
     ) -> Result<(), InterfaceSendError>;
@@ -182,14 +181,9 @@ pub trait Interface {
 /// TX worker.
 #[allow(clippy::result_unit_err)]
 pub trait InterfaceSink {
-    fn send_ty<T: Serialize>(
-        &mut self,
-        hdr: &CommonHeader,
-        apdx: Option<&AnyAllAppendix>,
-        body: &T,
-    ) -> Result<(), ()>;
-    fn send_raw(&mut self, hdr: &CommonHeader, hdr_raw: &[u8], body: &[u8]) -> Result<(), ()>;
-    fn send_err(&mut self, hdr: &CommonHeader, err: ProtocolError) -> Result<(), ()>;
+    fn send_ty<T: Serialize>(&mut self, hdr: &HeaderSeq, body: &T) -> Result<(), ()>;
+    fn send_raw(&mut self, hdr: &HeaderSeq, body: &[u8]) -> Result<(), ()>;
+    fn send_err(&mut self, hdr: &HeaderSeq, err: ProtocolError) -> Result<(), ()>;
 }
 
 #[cfg_attr(feature = "defmt-v1", derive(defmt::Format))]
@@ -203,8 +197,8 @@ pub enum InterfaceSendError {
     /// Profile found a destination interface, but that interface
     /// was full in space/slots
     InterfaceFull,
-    /// TODO: Remove
-    PlaceholderOhNo,
+    /// An unhandled internal error occurred, this is a bug.
+    InternalError,
     /// Destination was an "any" port, but a key was not provided
     AnyPortMissingKey,
     /// TTL has reached the terminal value
@@ -251,7 +245,7 @@ impl InterfaceSendError {
             InterfaceSendError::DestinationLocal => ProtocolError::ISE_DESTINATION_LOCAL,
             InterfaceSendError::NoRouteToDest => ProtocolError::ISE_NO_ROUTE_TO_DEST,
             InterfaceSendError::InterfaceFull => ProtocolError::ISE_INTERFACE_FULL,
-            InterfaceSendError::PlaceholderOhNo => ProtocolError::ISE_PLACEHOLDER_OH_NO,
+            InterfaceSendError::InternalError => ProtocolError::ISE_INTERNAL_ERROR,
             InterfaceSendError::AnyPortMissingKey => ProtocolError::ISE_ANY_PORT_MISSING_KEY,
             InterfaceSendError::TtlExpired => ProtocolError::ISE_TTL_EXPIRED,
             InterfaceSendError::RoutingLoop => ProtocolError::ISE_ROUTING_LOOP,

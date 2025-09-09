@@ -5,7 +5,7 @@ use log::{debug, trace};
 use serde::Serialize;
 
 use crate::{
-    FrameKind, Header, ProtocolError,
+    FrameKind, Header, HeaderSeq, ProtocolError,
     interface_manager::{self, InterfaceSendError, Profile},
     net_stack::NetStackSendError,
     socket::{SocketHeader, SocketSendError, SocketVTable, borser},
@@ -193,8 +193,7 @@ where
     /// Handle sending of a raw (serialized) message
     pub(super) fn send_raw(
         &mut self,
-        hdr: &Header,
-        hdr_raw: &[u8],
+        hdr: &HeaderSeq,
         body: &[u8],
         source: P::InterfaceIdent,
     ) -> Result<(), NetStackSendError> {
@@ -210,20 +209,22 @@ where
             todo!("{hdr}: Don't do that");
         }
 
+        let nshdr: Header = hdr.clone().into();
+
         // Is this a broadcast message?
         if hdr.dst.port_id == 255 {
             Self::broadcast(
                 sockets,
-                hdr,
-                |skt| Self::send_raw_to_socket(skt, body, hdr, hdr_raw, seq_no).is_ok(),
-                || manager.send_raw(hdr, hdr_raw, body, source).is_ok(),
+                &nshdr,
+                |skt| Self::send_raw_to_socket(skt, body, &nshdr, seq_no).is_ok(),
+                || manager.send_raw(hdr, body, source).is_ok(),
             )
         } else {
             Self::unicast(
                 sockets,
-                hdr,
-                |skt| Self::send_raw_to_socket(skt, body, hdr, hdr_raw, seq_no),
-                || manager.send_raw(hdr, hdr_raw, body, source),
+                &nshdr,
+                |skt| Self::send_raw_to_socket(skt, body, &nshdr, seq_no),
+                || manager.send_raw(hdr, body, source),
             )
         }
     }
@@ -559,7 +560,6 @@ where
         this: NonNull<SocketHeader>,
         body: &[u8],
         hdr: &Header,
-        hdr_raw: &[u8],
         seq_no: &mut u16,
     ) -> Result<(), NetStackSendError> {
         let vtable: &'static SocketVTable = {
@@ -575,7 +575,7 @@ where
             seq
         });
 
-        (f)(this, body, hdr, hdr_raw).map_err(NetStackSendError::SocketSend)
+        (f)(this, body, hdr).map_err(NetStackSendError::SocketSend)
     }
 }
 

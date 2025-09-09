@@ -26,12 +26,12 @@ pub mod eusb_0_5;
 pub mod tokio_tcp;
 
 use crate::{
-    Header, ProtocolError,
+    Header, HeaderSeq, ProtocolError,
     interface_manager::{
         Interface, InterfaceSendError, InterfaceSink, InterfaceState, Profile, SetStateError,
     },
     net_stack::NetStackHandle,
-    wire_frames::{CommonHeader, de_frame},
+    wire_frames::de_frame,
 };
 
 pub const CENTRAL_NODE_ID: u8 = 1;
@@ -77,7 +77,7 @@ impl<I: Interface> DirectEdge<I> {
     fn common_send<'b>(
         &'b mut self,
         ihdr: &Header,
-    ) -> Result<(&'b mut I::Sink, CommonHeader), InterfaceSendError> {
+    ) -> Result<(&'b mut I::Sink, HeaderSeq), InterfaceSendError> {
         let net_id = match &self.state {
             InterfaceState::Down => {
                 trace!("{ihdr}: ignoring send, interface down");
@@ -133,16 +133,11 @@ impl<I: Interface> DirectEdge<I> {
             hdr.dst.node_id = self.other_node_id;
         }
 
-        let seq_no = self.seq_no;
-        self.seq_no = self.seq_no.wrapping_add(1);
-
-        let header = CommonHeader {
-            src: hdr.src,
-            dst: hdr.dst,
-            seq_no,
-            kind: hdr.kind,
-            ttl: hdr.ttl,
-        };
+        let header = ihdr.to_headerseq_or_with_seq(|| {
+            let seq_no = self.seq_no;
+            self.seq_no = self.seq_no.wrapping_add(1);
+            seq_no
+        });
         if [0, 255].contains(&hdr.dst.port_id) && ihdr.any_all.is_none() {
             return Err(InterfaceSendError::AnyPortMissingKey);
         }
@@ -157,7 +152,7 @@ impl<I: Interface> Profile for DirectEdge<I> {
     fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError> {
         let (intfc, header) = self.common_send(hdr)?;
 
-        let res = intfc.send_ty(&header, hdr.any_all.as_ref(), data);
+        let res = intfc.send_ty(&header, data);
 
         match res {
             Ok(()) => Ok(()),
@@ -186,8 +181,7 @@ impl<I: Interface> Profile for DirectEdge<I> {
 
     fn send_raw(
         &mut self,
-        _hdr: &Header,
-        _hdr_raw: &[u8],
+        _hdr: &HeaderSeq,
         _data: &[u8],
         _source: Self::InterfaceIdent,
     ) -> Result<(), InterfaceSendError> {
@@ -284,11 +278,13 @@ pub fn process_frame<N>(
     //
     // If the dest is 0, should we rewrite the dest as self.net_id? This
     // is the opposite as above, but I dunno how that will work with responses
-    let hdr = frame.hdr.clone();
-    let hdr: Header = hdr.into();
     let res = match frame.body {
-        Ok(body) => nsh.stack().send_raw(&hdr, frame.hdr_raw, body, ident),
-        Err(e) => nsh.stack().send_err(&hdr, e, Some(ident)),
+        Ok(body) => nsh.stack().send_raw(&frame.hdr, body, ident),
+        Err(e) => {
+            // send_err requires a Header instead of a HeaderSeq, so we convert it
+            let nshdr: Header = frame.hdr.clone().into();
+            nsh.stack().send_err(&nshdr, e, Some(ident))
+        }
     };
 
     match res {
