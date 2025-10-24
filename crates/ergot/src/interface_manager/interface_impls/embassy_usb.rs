@@ -108,12 +108,12 @@ impl<const CONFIG: usize, const BOS: usize, const CONTROL: usize, const MSOS: us
 pub mod eusb_0_5 {
     use core::sync::atomic::Ordering;
 
+    use crate::logging::{info, warn};
     use bbq2::{
         prod_cons::framed::FramedConsumer,
         queue::BBQueue,
         traits::{coordination::Coord, notifier::maitake::MaiNotSpsc, storage::Inline},
     };
-    use defmt::{debug, info, warn};
     use embassy_futures::select::{select, Either};
     use embassy_time::Timer;
     use embassy_usb_0_5::{
@@ -161,7 +161,7 @@ pub mod eusb_0_5 {
                 // Wait for an outgoing frame
                 let frame = rx.wait_read().await;
 
-                debug!("Got frame to send len {=usize}", frame.len());
+                defmt::debug!("Got frame to send len {=usize}", frame.len());
 
                 // Attempt to send it
                 let res = send_all::<D>(
