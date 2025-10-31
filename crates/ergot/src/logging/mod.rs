@@ -1,3 +1,6 @@
+//! Here we make logging macros available.
+//! Based on features we either export defmt macros or log wrapper macros.
+
 pub mod fmtlog;
 pub mod log_v0_4;
 
@@ -7,6 +10,7 @@ pub mod log_v0_4;
 #[cfg(all(feature = "defmt-v1", not(feature = "std")))]
 pub(crate) use defmt::{debug, error, info, trace, warn};
 
+/// Wrapper macro for log::debug that uses the internal ergot logger.
 #[clippy::format_args]
 #[cfg(not(all(feature = "defmt-v1", not(feature = "std"))))]
 macro_rules! debug {
@@ -20,6 +24,7 @@ macro_rules! debug {
     ($($arg:tt)+) => (log::debug!(logger: $crate::logging::log_v0_4::internal::geil(), $($arg)+))
 }
 
+/// Wrapper macro for log::error that uses the internal ergot logger.
 #[clippy::format_args]
 #[cfg(not(all(feature = "defmt-v1", not(feature = "std"))))]
 macro_rules! error {
@@ -33,6 +38,7 @@ macro_rules! error {
     ($($arg:tt)+) => (log::error!(logger: $crate::logging::log_v0_4::internal::geil(), $($arg)+))
 }
 
+/// Wrapper macro for log::info that uses the internal ergot logger.
 #[clippy::format_args]
 #[cfg(not(all(feature = "defmt-v1", not(feature = "std"))))]
 macro_rules! info {
@@ -46,6 +52,7 @@ macro_rules! info {
     ($($arg:tt)+) => (log::info!(logger: $crate::logging::log_v0_4::internal::geil(), $($arg)+))
 }
 
+/// Wrapper macro for log::trace that uses the internal ergot logger.
 #[clippy::format_args]
 #[cfg(not(all(feature = "defmt-v1", not(feature = "std"))))]
 macro_rules! trace {
@@ -59,6 +66,7 @@ macro_rules! trace {
     ($($arg:tt)+) => (log::trace!(logger: $crate::logging::log_v0_4::internal::geil(), $($arg)+))
 }
 
+/// Wrapper macro for log::warn that uses the internal ergot logger.
 #[clippy::format_args]
 #[cfg(not(all(feature = "defmt-v1", not(feature = "std"))))]
 macro_rules! warni {
