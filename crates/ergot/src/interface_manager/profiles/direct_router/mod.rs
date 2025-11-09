@@ -5,13 +5,21 @@
 //! as well as messages to/from itself and an edge device. It does not currently handle
 //! multi-hop routing.
 
-use core::time::Duration;
+
+#[cfg(any(feature = "std", feature = "_all-features-hack"))]
+use std::time::{Duration, Instant};
+#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
+use embassy_time::Duration as Duration;
+#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
+use embassy_time::Instant as Instant;
+
+#[cfg(feature = "std")]
 use std::{
     collections::{BTreeMap, HashMap},
-    time::Instant,
 };
 
 use crate::logging::{debug, info, trace, warn};
+#[cfg(feature = "std")]
 use rand::Rng;
 
 use crate::{
@@ -27,6 +35,7 @@ use crate::{
 
 use super::direct_edge::EDGE_NODE_ID;
 
+#[cfg(feature = "tokio-std")]
 pub mod tokio_tcp;
 
 #[cfg(feature = "nusb-v0_1")]
