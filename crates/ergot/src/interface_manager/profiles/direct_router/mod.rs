@@ -5,18 +5,15 @@
 //! as well as messages to/from itself and an edge device. It does not currently handle
 //! multi-hop routing.
 
-
+#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
+use embassy_time::Duration;
+#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
+use embassy_time::Instant;
 #[cfg(any(feature = "std", feature = "_all-features-hack"))]
 use std::time::{Duration, Instant};
-#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
-use embassy_time::Duration as Duration;
-#[cfg(all(feature = "embassy-net-v0_7", not(feature = "_all-features-hack")))]
-use embassy_time::Instant as Instant;
 
 #[cfg(feature = "std")]
-use std::{
-    collections::{BTreeMap, HashMap},
-};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::logging::{debug, info, trace, warn};
 #[cfg(feature = "std")]
@@ -37,6 +34,8 @@ use super::direct_edge::EDGE_NODE_ID;
 
 #[cfg(feature = "tokio-std")]
 pub mod tokio_tcp;
+#[cfg(feature = "tokio-std")]
+pub mod tokio_udp;
 
 #[cfg(feature = "nusb-v0_1")]
 pub mod nusb_0_1;
@@ -165,12 +164,21 @@ impl<I: Interface> Profile for DirectRouter<I> {
             if hdr.any_all.is_none() {
                 return Err(InterfaceSendError::AnyPortMissingKey);
             }
+            if self.direct_links.is_empty() {
+                return Err(InterfaceSendError::NoRouteToDest);
+            }
+
+            // use this error until we find a non-origin destination
+            let mut default_error = InterfaceSendError::RoutingLoop;
+
             let mut any_good = false;
             for (_ident, p) in self.direct_links.iter_mut() {
                 // Don't send back to the origin
                 if source == p.ident {
                     continue;
                 }
+                // if there's a non-origin destination, and we can't send to it, then use this error
+                default_error = InterfaceSendError::NoRouteToDest;
 
                 // For broadcast messages, rewrite the destination address
                 // to the address of the next hop.
@@ -178,11 +186,7 @@ impl<I: Interface> Profile for DirectRouter<I> {
                 hdr.dst.node_id = EDGE_NODE_ID;
                 any_good |= p.edge.send_raw(&hdr, data).is_ok();
             }
-            if any_good {
-                Ok(())
-            } else {
-                Err(InterfaceSendError::NoRouteToDest)
-            }
+            if any_good { Ok(()) } else { Err(default_error) }
         } else {
             let nshdr = hdr.clone().into();
             let intfc = self.find(&nshdr, Some(source))?;

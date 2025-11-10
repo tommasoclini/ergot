@@ -1,5 +1,5 @@
 [package]
-name = "ergot-bridge-client"
+name = "ergot-bridge-pair-udp"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,3 +10,9 @@ log             = { workspace = true }
 ergot           = { workspace = true }
 mutex           = { workspace = true }
 tokio           = { workspace = true }
+
+[[bin]]
+name = "controller"
+
+[[bin]]
+name = "target"
