@@ -161,7 +161,7 @@ pub async fn register_interface<N>(
     baud: u32,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
-) -> Result<u64, Error>
+) -> Result<(u64, Arc<WaitQueue>), Error>
 where
     N: NetStackHandle<Profile = DirectRouter<TokioSerialInterface>>,
     N: Send + 'static,
@@ -199,11 +199,11 @@ where
         net_id,
         tx,
         rx: <StdQueue as BbqHandle>::stream_consumer(&q),
-        closer,
+        closer: closer.clone(),
     };
 
     tokio::task::spawn(rx_worker.run());
     tokio::task::spawn(tx_worker.run());
 
-    Ok(ident)
+    Ok((ident, closer))
 }

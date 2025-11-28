@@ -292,6 +292,8 @@ pub mod nusb_v0_1 {
 
 #[cfg(feature = "tokio-serial-v5")]
 pub mod tokio_serial_v5 {
+    use std::sync::Arc;
+
     use crate::interface_manager::{
         interface_impls::tokio_serial_cobs::TokioSerialInterface,
         profiles::{
@@ -299,6 +301,7 @@ pub mod tokio_serial_v5 {
             direct_router::{self, DirectRouter, tokio_serial_5::Error},
         },
     };
+    use maitake_sync::WaitQueue;
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
     pub use crate::interface_manager::utils::std::new_std_queue;
@@ -314,7 +317,7 @@ pub mod tokio_serial_v5 {
         baud: u32,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, Arc<WaitQueue>), Error> {
         direct_router::tokio_serial_5::register_interface(
             stack.clone(),
             port,
