@@ -6,10 +6,10 @@ use crate::logging::{debug, error, info, warn};
 use crate::{
     interface_manager::{
         InterfaceState, Profile,
-        interface_impls::tokio_serial_cobs::TokioSerialInterface,
+        interface_impls::tokio_serial_cobs::{TokioSerialInterface, WrapperSink},
         profiles::direct_router::{DirectRouter, process_frame},
         utils::{
-            cobs_stream::Sink,
+            cobs_stream::Sink as CobsSink,
             std::{
                 ReceiverError, StdQueue,
                 acc::{CobsAccumulator, FeedResult},
@@ -171,9 +171,14 @@ where
         .map_err(|e| Error::Serial(format!("Open Error: {:?}", e)))?;
     let (rx, tx) = tokio::io::split(port);
     let q: StdQueue = new_std_queue(outgoing_buffer_size);
+
+    let closer = Arc::new(WaitQueue::new());
+
     let res = stack.stack().manage_profile(|im| {
-        let ident =
-            im.register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))?;
+        let ident = im.register_interface(WrapperSink::new(
+            CobsSink::new_from_handle(q.clone(), max_ergot_packet_size),
+            closer.clone(),
+        ))?;
         let state = im.interface_state(ident)?;
         match state {
             InterfaceState::Active { net_id, node_id: _ } => Some((ident, net_id)),
@@ -186,7 +191,6 @@ where
     let Some((ident, net_id)) = res else {
         return Err(Error::OutOfNetIds);
     };
-    let closer = Arc::new(WaitQueue::new());
     let rx_worker = RxWorker {
         nsh: stack.clone(),
         skt: rx,
@@ -199,7 +203,7 @@ where
         net_id,
         tx,
         rx: <StdQueue as BbqHandle>::stream_consumer(&q),
-        closer,
+        closer: closer.clone(),
     };
 
     tokio::task::spawn(rx_worker.run());
