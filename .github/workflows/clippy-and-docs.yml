@@ -1,0 +1,46 @@
+name: Clippy and Documentation
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  clippy:
+    name: "Clippy and Documentation - all crates"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust-toolchain:
+          - nightly
+          - stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust-toolchain }}
+          components: clippy
+      #
+      # COBS ACC
+      - name: Clippy cobs-acc (all features)
+        working-directory: ./crates/cobs-acc
+        run: cargo clippy --all-features
+      - name: Documentation cobs-acc (all features)
+        working-directory: ./crates/cobs-acc
+        run: cargo doc --all-features
+      #
+      # ERGOT Prime
+      - name: Clippy ergot (all features)
+        working-directory: ./crates/ergot
+        run: cargo clippy --all-features
+      - name: Documentation ergot (all features)
+        working-directory: ./crates/ergot
+        run: cargo doc --all-features
