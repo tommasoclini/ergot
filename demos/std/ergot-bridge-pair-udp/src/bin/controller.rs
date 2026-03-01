@@ -5,7 +5,7 @@ use ergot::{
     topic,
     well_known::DeviceInfo,
 };
-use log::{debug, info, warn};
+use log::{debug, info};
 use tokio::{net::UdpSocket, select, time, time::sleep};
 
 use ergot::interface_manager::profiles::direct_edge::tokio_udp::InterfaceKind;
@@ -86,8 +86,6 @@ async fn do_discovery(stack: EdgeStack) {
             info!("Removed: {:?}", rem);
         }
         seen = new_seen;
-
-        ticker.tick().await;
     }
 }
 
