@@ -435,13 +435,10 @@ where
         let Some(apdx) = hdr.any_all.as_ref() else {
             return Err(NetStackSendError::AnyPortMissingKey);
         };
-        let mut iter = sockets.iter_raw();
+        let iter = sockets.iter_raw();
         let mut socket: Option<NonNull<SocketHeader>> = None;
 
-        loop {
-            let Some(skt) = iter.next() else {
-                break;
-            };
+        for skt in iter {
             let skt_ref = unsafe { skt.as_ref() };
 
             // Check for things that would disqualify a socket from being an
