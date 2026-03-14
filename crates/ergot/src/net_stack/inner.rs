@@ -85,6 +85,8 @@ where
                         // no need to report /errors/ on routing loops
                         continue;
                     }
+                    // `e` is only used in the logging macro (no-op when internal logging is disabled)
+                    #[allow(unused_variables)]
                     Err(e) => {
                         error!(
                             "{}: failed to deliver broadcast message locally, error: {:?}",
@@ -106,6 +108,8 @@ where
                 debug!("{}: No external interest in msg broadcast", hdr);
                 true
             }
+            // `e` is only used in the logging macro (no-op when internal logging is disabled)
+            #[allow(unused_variables)]
             Err(e) => {
                 error!(
                     "{}: failed to deliver broadcast message remotely, error: {:?}",
@@ -219,6 +223,7 @@ where
     }
 
     /// Handle sending of a raw (serialized) message
+    #[allow(unused_variables)] // `e` in inspect_err is only used in logging macros (no-op when disabled)
     pub(super) fn send_raw(
         &mut self,
         hdr: &HeaderSeq,
@@ -261,6 +266,7 @@ where
     }
 
     /// Handle sending of a typed message
+    #[allow(unused_variables)] // `e` in inspect_err is only used in logging macros (no-op when disabled)
     pub(super) fn send_ty<T: 'static + Serialize + Clone>(
         &mut self,
         hdr: &Header,
@@ -300,6 +306,7 @@ where
     }
 
     /// Handle sending a borrowed message
+    #[allow(unused_variables)] // `e` in inspect_err is only used in logging macros (no-op when disabled)
     pub(super) fn send_bor<T: Serialize>(
         &mut self,
         hdr: &Header,
