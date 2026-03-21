@@ -4,6 +4,8 @@
 //! two devices. Interfaces are typically held by the Profile used by a netstack.
 
 #[cfg(feature = "tokio-std")]
+pub mod tokio_stream;
+#[cfg(feature = "tokio-std")]
 pub mod tokio_tcp;
 #[cfg(feature = "tokio-std")]
 pub mod tokio_udp;
@@ -11,7 +13,7 @@ pub mod tokio_udp;
 #[cfg(feature = "tokio-serial-v5")]
 pub mod tokio_serial_cobs;
 
-#[cfg(feature = "embassy-usb-v0_5")]
+#[cfg(any(feature = "embassy-usb-v0_5", feature = "embassy-usb-v0_6"))]
 pub mod embassy_usb;
 
 #[cfg(feature = "embassy-net-v0_7")]

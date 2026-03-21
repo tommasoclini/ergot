@@ -14,28 +14,26 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
+use bytes::Bytes;
 use clap::Parser;
-use cobs_acc::{CobsAccumulator, FeedResult};
 use ergot::{
     Address,
-    interface_manager::{
-        InterfaceState,
-        interface_impls::tokio_serial_cobs::TokioSerialInterface,
-        profiles::direct_edge::{DirectEdge, process_frame as ergot_edge_process_frame},
-        utils::{cobs_stream::Sink as ErgotSink, std::new_std_queue},
-    },
-    net_stack::ArcNetStack,
+    toolkits::tokio_stream::{self as stream_kit, EdgeStack},
     well_known::ErgotPingEndpoint,
 };
+use futures::SinkExt;
 use log::{error, info, warn};
-use mutex::raw_impls::cs::CriticalSectionRawMutex;
 use probe_rs::{
     Permissions,
     probe::list::Lister,
     rtt::{Rtt, ScanRegion},
 };
+use std::io;
 use std::time::Duration;
 use tokio::time::{interval, timeout};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::{CopyToBytes, SinkWriter, StreamReader};
+use tokio_util::sync::PollSender;
 
 /// Host-side ergot router using RTT transport
 #[derive(Parser, Debug)]
@@ -132,10 +130,6 @@ fn connect_probe(probe_selector: Option<&str>, chip: &str) -> Result<probe_rs::S
     Ok(session)
 }
 
-// TokioSerialInterface is used as the Interface type because DirectEdge only
-// needs its Sink for COBS framing — actual I/O goes through probe-rs RTT.
-type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioSerialInterface>>;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -154,35 +148,35 @@ async fn main() -> Result<()> {
 
     let mut session = connect_probe(args.probe.as_deref(), &args.chip)?;
 
-    // Load defmt table if ELF is provided
     let has_rtt_defmt = args.elf.is_some() && !args.defmt_via_ergot;
     let has_ergot_defmt = args.elf.is_some() && args.defmt_via_ergot;
 
-    // Create ergot edge stack
-    let queue = new_std_queue(4096);
-    let stack: EdgeStack = ArcNetStack::new_with_profile(DirectEdge::new_controller(
-        ErgotSink::new_from_handle(queue.clone(), ERGOT_MTU),
-        InterfaceState::Active {
-            net_id: 1,
-            node_id: 1,
-        },
-    ));
+    // Create ergot stack using the tokio_stream toolkit
+    let queue = stream_kit::new_std_queue(4096);
+    let stack: EdgeStack = stream_kit::new_controller_stack(&queue, ERGOT_MTU);
 
     info!("Ergot RTT host started");
 
-    // Single blocking I/O thread for all RTT operations.
-    // probe-rs RTT is synchronous and holds Core/Rtt references that aren't Send,
-    // so we run all RTT I/O in a dedicated thread and communicate via channels.
-    let tx_queue: &'static _ = Box::leak(Box::new(queue.clone()));
+    // Set up channels between blocking RTT thread and async world.
+    //
+    // RX (device→host): RTT thread sends bytes via blocking_send,
+    //   StreamReader wraps the receiver into AsyncRead for ergot.
+    // TX (host→device): ergot writes via SinkWriter→PollSender→channel,
+    //   RTT thread receives with try_recv.
     let ergot_up_ch = args.up_channel;
     let ergot_down_ch = args.down_channel;
     let defmt_ch = args.defmt_channel;
 
-    let (ergot_rx_tx, mut ergot_rx_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    let (ergot_tx_tx, ergot_tx_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // RX channel: RTT thread → ergot (AsyncRead via StreamReader)
+    let (ergot_rx_tx, ergot_rx_rx) = tokio::sync::mpsc::channel::<io::Result<Bytes>>(64);
+    let reader = StreamReader::new(ReceiverStream::new(ergot_rx_rx));
 
-    // defmt frames sent from the RTT thread to tokio for decoding
-    // (only created when raw RTT defmt is active)
+    // TX channel: ergot (AsyncWrite via SinkWriter) → RTT thread
+    let (ergot_tx_tx, mut ergot_tx_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    let writer = SinkWriter::new(CopyToBytes::new(
+        PollSender::new(ergot_tx_tx).sink_map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e)),
+    ));
+
     let (defmt_data_tx, defmt_data_rx) = if has_rtt_defmt {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         (Some(tx), Some(rx))
@@ -190,7 +184,7 @@ async fn main() -> Result<()> {
         (None, None)
     };
 
-    // RTT I/O thread - owns Session, Core and Rtt, never re-attaches
+    // RTT I/O thread — owns Session, Core and Rtt, never re-attaches
     std::thread::spawn(move || {
         let mut core = session.core(0).expect("Failed to get core 0");
         let mut rtt =
@@ -220,19 +214,20 @@ async fn main() -> Result<()> {
         loop {
             let mut did_work = false;
 
-            // 1. Read ergot data from device
+            // 1. Read ergot data from device → send to async world
             if let Some(channel) = rtt.up_channel(ergot_up_ch) {
                 match channel.read(&mut core, &mut ergot_rx_buf) {
                     Ok(n) if n > 0 => {
                         did_work = true;
-                        let _ = ergot_rx_tx.blocking_send(ergot_rx_buf[..n].to_vec());
+                        let _ = ergot_rx_tx
+                            .blocking_send(Ok(Bytes::copy_from_slice(&ergot_rx_buf[..n])));
                     }
                     Ok(_) => {}
                     Err(e) => error!("RTT ergot read error: {}", e),
                 }
             }
 
-            // 2. Write ergot data to device
+            // 2. Write ergot data to device ← receive from async world
             while let Ok(data) = ergot_tx_rx.try_recv() {
                 if let Some(channel) = rtt.down_channel(ergot_down_ch) {
                     if let Err(e) = channel.write(&mut core, &data) {
@@ -266,78 +261,42 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Ergot RX processing task
-    tokio::spawn({
-        let stack = stack.clone();
-        async move {
-            let mut cobs_acc = CobsAccumulator::new_boxslice((ERGOT_MTU as usize) + 64);
-            let mut net_id = Some(1u16);
-
-            while let Some(data) = ergot_rx_rx.recv().await {
-                let mut data = data;
-                let mut window = &mut data[..];
-                while !window.is_empty() {
-                    window = match cobs_acc.feed_raw(window) {
-                        FeedResult::Consumed => break,
-                        FeedResult::OverFull(rem) | FeedResult::DecodeError(rem) => rem,
-                        FeedResult::Success { data, remaining }
-                        | FeedResult::SuccessInput { data, remaining } => {
-                            ergot_edge_process_frame(&mut net_id, data, &stack, ());
-                            remaining
-                        }
-                    };
-                }
-            }
-        }
-    });
-
-    // Ergot TX forwarding task
-    tokio::spawn(async move {
-        let tx_consumer = tx_queue.stream_consumer();
-        loop {
-            let frame = tx_consumer.wait_read().await;
-            let len = frame.len();
-            if len > 0 {
-                let data = frame[..len].to_vec();
-                frame.release(len);
-                let _ = ergot_tx_tx.send(data);
-            } else {
-                frame.release(len);
-            }
-        }
-    });
+    // Register with ergot's tokio_stream toolkit — handles all COBS framing
+    stream_kit::register_controller_stream(stack.clone(), reader, writer, queue)
+        .await
+        .map_err(|_| anyhow!("Interface already active"))?;
 
     // defmt decoder task (raw RTT channel)
-    if let (Some(elf_path), Some(mut defmt_data_rx)) = (&args.elf, defmt_data_rx) {
-        if !args.defmt_via_ergot {
-            let elf_bytes = std::fs::read(elf_path)?;
-            let table = defmt_decoder::Table::parse(&elf_bytes)
-                .context("Failed to parse defmt table")?
-                .ok_or_else(|| anyhow!("No .defmt section"))?;
+    if let (Some(elf_path), Some(mut defmt_data_rx)) = (&args.elf, defmt_data_rx)
+        && !args.defmt_via_ergot
+    {
+        let elf_bytes = std::fs::read(elf_path)?;
+        let table = defmt_decoder::Table::parse(&elf_bytes)
+            .context("Failed to parse defmt table")?
+            .ok_or_else(|| anyhow!("No .defmt section"))?;
 
-            tokio::spawn(async move {
-                let mut stream_decoder = table.new_stream_decoder();
+        tokio::spawn(async move {
+            let mut stream_decoder = table.new_stream_decoder();
 
-                while let Some(data) = defmt_data_rx.recv().await {
-                    stream_decoder.received(&data);
-                    loop {
-                        match stream_decoder.decode() {
-                            Ok(frame) => {
-                                println!("[defmt] {}", frame.display(true));
-                            }
-                            Err(defmt_decoder::DecodeError::UnexpectedEof) => break,
-                            Err(defmt_decoder::DecodeError::Malformed) => {
-                                warn!("Malformed defmt frame");
-                                break;
-                            }
+            while let Some(data) = defmt_data_rx.recv().await {
+                stream_decoder.received(&data);
+                loop {
+                    match stream_decoder.decode() {
+                        Ok(frame) => {
+                            println!("[defmt] {}", frame.display(true));
+                        }
+                        Err(defmt_decoder::DecodeError::UnexpectedEof) => break,
+                        Err(defmt_decoder::DecodeError::Malformed) => {
+                            warn!("Malformed defmt frame");
+                            break;
                         }
                     }
                 }
-            });
-        }
+            }
+        });
     }
 
-    // defmt-via-ergot decoder task: subscribe to ergot/.well-known/defmt topic
+    // defmt-via-ergot decoder task
     if has_ergot_defmt {
         let elf_bytes = std::fs::read(args.elf.as_ref().unwrap())?;
         let table = defmt_decoder::Table::parse(&elf_bytes)

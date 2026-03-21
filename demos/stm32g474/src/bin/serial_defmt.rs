@@ -88,13 +88,13 @@ async fn main(spawner: Spawner) {
 
     info!("Ergot stack initialized");
 
-    spawner.must_spawn(rx_task(stack, uart_rx));
-    spawner.must_spawn(tx_task(tx_queue, uart_tx));
-    spawner.must_spawn(ping_handler(stack));
-    spawner.must_spawn(defmt_forwarder(stack, defmt_consumer));
+    spawner.spawn(rx_task(stack, uart_rx).unwrap());
+    spawner.spawn(tx_task(tx_queue, uart_tx).unwrap());
+    spawner.spawn(ping_handler(stack).unwrap());
+    spawner.spawn(defmt_forwarder(stack, defmt_consumer).unwrap());
 
     let led = Output::new(p.PA5, Level::Low, Speed::Low);
-    spawner.must_spawn(led_server(stack, led));
+    spawner.spawn(led_server(stack, led).unwrap());
 
     info!("All tasks spawned");
 

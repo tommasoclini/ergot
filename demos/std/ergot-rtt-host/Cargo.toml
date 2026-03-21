@@ -8,17 +8,15 @@ description = "Host-side ergot router using RTT transport via probe-rs"
 # Ergot with tokio support
 ergot = { workspace = true, features = ["defmtlog"] }
 
-# COBS framing
-cobs-acc = { path = "../../../crates/cobs-acc", features = ["std"] }
-
-# Mutex for shared state
-mutex = { workspace = true }
-
 # probe-rs for RTT communication with embedded devices
 probe-rs = "0.28"
 
-# Async runtime
+# Async runtime & utils
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
+bytes = "1"
+futures = "0.3"
 
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }

@@ -133,6 +133,45 @@ pub mod embassy_usb_v0_5 {
     }
 }
 
+#[cfg(feature = "embassy-usb-v0_6")]
+pub mod embassy_usb_v0_6 {
+    use crate::{
+        exports::bbqueue::{
+            BBQueue,
+            prod_cons::framed::FramedProducer,
+            traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
+        },
+        interface_manager::{
+            profiles::direct_edge::{
+                DirectEdge,
+                eusb_0_6::{self, EmbassyUsbManager},
+            },
+            utils::framed_stream::Sink,
+        },
+    };
+    use mutex::{ConstInit, ScopedRawMutex};
+
+    use crate::NetStack;
+
+    pub use crate::interface_manager::interface_impls::embassy_usb::{
+        DEFAULT_TIMEOUT_MS_PER_FRAME, USB_FS_MAX_PACKET_SIZE,
+        eusb_0_6::{WireStorage, tx_worker},
+    };
+
+    pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
+    pub type Stack<Q, R> = NetStack<R, EmbassyUsbManager<Q>>;
+    pub type BaseStack<Q, R> = crate::NetStack<R, EmbassyUsbManager<Q>>;
+    pub type RxWorker<Q, R, D> = eusb_0_6::RxWorker<Q, &'static BaseStack<Q, R>, D>;
+
+    pub const fn new_target_stack<Q, R>(producer: FramedProducer<Q, u16>, mtu: u16) -> Stack<Q, R>
+    where
+        Q: BbqHandle,
+        R: ScopedRawMutex + ConstInit + 'static,
+    {
+        NetStack::new_with_profile(DirectEdge::new_target(Sink::new(producer, mtu)))
+    }
+}
+
 #[cfg(feature = "embassy-net-v0_7")]
 pub mod embassy_net_v0_7 {
     use crate::NetStack;
@@ -291,6 +330,39 @@ pub mod tokio_udp {
     ) -> crate::toolkits::tokio_udp::EdgeStack {
         crate::toolkits::tokio_udp::EdgeStack::new_with_profile(DirectEdge::new_controller(
             framed_stream::Sink::new_from_handle(queue.clone(), mtu),
+            InterfaceState::Down,
+        ))
+    }
+}
+
+#[cfg(feature = "tokio-std")]
+pub mod tokio_stream {
+    use crate::interface_manager::{
+        InterfaceState,
+        interface_impls::tokio_stream::TokioStreamInterface,
+        profiles::direct_edge::{self, DirectEdge},
+        utils::{cobs_stream, std::StdQueue},
+    };
+    use mutex::raw_impls::cs::CriticalSectionRawMutex;
+
+    pub use crate::interface_manager::utils::std::new_std_queue;
+
+    use crate::net_stack::ArcNetStack;
+
+    pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioStreamInterface>>;
+
+    pub use direct_edge::tokio_stream::{register_controller_stream, register_target_stream};
+
+    pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
+        EdgeStack::new_with_profile(DirectEdge::new_target(cobs_stream::Sink::new_from_handle(
+            queue.clone(),
+            mtu,
+        )))
+    }
+
+    pub fn new_controller_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
+        EdgeStack::new_with_profile(DirectEdge::new_controller(
+            cobs_stream::Sink::new_from_handle(queue.clone(), mtu),
             InterfaceState::Down,
         ))
     }
