@@ -1,6 +1,7 @@
-//! A TCP based DirectRouter
+//! A generic stream based DirectRouter
 //!
-//! This implementation can be used to connect to a number of direct edge TCP devices.
+//! This implementation can be used to connect to direct edge devices over any
+//! tokio AsyncRead/AsyncWrite stream (TCP, serial, RTT adapters, etc.).
 
 use crate::logging::{debug, error, info, warn};
 use bbqueue::{prod_cons::stream::StreamConsumer, traits::bbqhdl::BbqHandle};
@@ -8,18 +9,14 @@ use cobs::max_encoding_overhead;
 use maitake_sync::WaitQueue;
 use std::sync::Arc;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     select,
 };
 
 use crate::{
     interface_manager::{
         InterfaceState, LivenessConfig, Profile,
-        interface_impls::tokio_tcp::TokioTcpInterface,
+        interface_impls::tokio_stream::TokioStreamInterface,
         profiles::direct_router::{DirectRouter, process_frame},
         utils::{
             cobs_stream::Sink,
@@ -40,20 +37,20 @@ pub enum Error {
 
 struct TxWorker {
     net_id: u16,
-    tx: OwnedWriteHalf,
+    tx: Box<dyn AsyncWrite + Unpin + Send>,
     rx: StreamConsumer<StdQueue>,
     closer: Arc<WaitQueue>,
 }
 
 struct RxWorker<N>
 where
-    N: NetStackHandle<Profile = DirectRouter<TokioTcpInterface>>,
+    N: NetStackHandle<Profile = DirectRouter<TokioStreamInterface>>,
     N: Send + 'static,
 {
     interface_id: u64,
     net_id: u16,
     nsh: N,
-    skt: OwnedReadHalf,
+    reader: Box<dyn AsyncRead + Unpin + Send>,
     closer: Arc<WaitQueue>,
     mtu: u16,
     liveness: Option<LivenessConfig>,
@@ -85,7 +82,7 @@ impl TxWorker {
             let res = self.tx.write_all(&frame).await;
             frame.release(len);
             if let Err(e) = res {
-                error!("Tx Error. socket: {:?}, error: {:?}", self.tx, e);
+                error!("Tx Error: {:?}", e);
                 break;
             }
         }
@@ -94,24 +91,20 @@ impl TxWorker {
 
 impl<N> RxWorker<N>
 where
-    N: NetStackHandle<Profile = DirectRouter<TokioTcpInterface>>,
+    N: NetStackHandle<Profile = DirectRouter<TokioStreamInterface>>,
     N: Send + 'static,
 {
     async fn run(mut self) {
         let close = self.closer.clone();
 
-        // Wait for the receiver to encounter an error, or wait for
-        // the transmitter to signal that it observed an error
         select! {
             run = self.run_inner() => {
-                // Halt the TX worker
                 self.closer.close();
                 error!("Receive Error: {:?}", run);
             },
             _clf = close.wait() => {},
         }
 
-        // Remove this interface from the list
         self.nsh.stack().manage_profile(|im| {
             _ = im.deregister_interface(self.interface_id);
         });
@@ -127,7 +120,7 @@ where
         let mut have_received = false;
 
         loop {
-            let rd = self.skt.read(&mut raw_buf);
+            let rd = self.reader.read(&mut raw_buf);
             let close = self.closer.wait();
 
             let liveness_active = self.liveness.is_some() && have_received;
@@ -202,6 +195,7 @@ where
             }
 
             if got_frame {
+                // Re-establish Active if we were Inactive after a liveness timeout
                 if !have_received {
                     let changed = self.nsh.stack().manage_profile(|im| {
                         if matches!(
@@ -232,17 +226,17 @@ where
 
 pub async fn register_interface<N>(
     stack: N,
-    socket: TcpStream,
+    reader: impl AsyncRead + Unpin + Send + 'static,
+    writer: impl AsyncWrite + Unpin + Send + 'static,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
     liveness: Option<LivenessConfig>,
     state_notify: Option<Arc<WaitQueue>>,
 ) -> Result<u64, Error>
 where
-    N: NetStackHandle<Profile = DirectRouter<TokioTcpInterface>>,
+    N: NetStackHandle<Profile = DirectRouter<TokioStreamInterface>>,
     N: Send + 'static,
 {
-    let (rx, tx) = socket.into_split();
     let q: StdQueue = new_std_queue(outgoing_buffer_size);
     let res = stack.stack().manage_profile(|im| {
         let ident =
@@ -260,9 +254,10 @@ where
         return Err(Error::OutOfNetIds);
     };
     let closer = Arc::new(WaitQueue::new());
+
     let rx_worker = RxWorker {
         nsh: stack.clone(),
-        skt: rx,
+        reader: Box::new(reader),
         closer: closer.clone(),
         mtu: max_ergot_packet_size,
         interface_id: ident,
@@ -272,12 +267,11 @@ where
     };
     let tx_worker = TxWorker {
         net_id,
-        tx,
+        tx: Box::new(writer),
         rx: <StdQueue as BbqHandle>::stream_consumer(&q),
         closer: closer.clone(),
     };
 
-    // Store closer so deregister_interface() can signal workers
     stack.stack().manage_profile(|im| {
         im.set_interface_closer(ident, closer);
     });

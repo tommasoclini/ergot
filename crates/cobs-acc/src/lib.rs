@@ -63,6 +63,12 @@ impl<B: DerefMut<Target = [u8]>> CobsAccumulator<B> {
         }
     }
 
+    /// Reset the accumulator, discarding any partial data.
+    pub fn reset(&mut self) {
+        self.idx = 0;
+        self.in_overflow = false;
+    }
+
     /// Appends data to the internal buffer and attempts to deserialize the accumulated data into
     /// `T`.
     ///

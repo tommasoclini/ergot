@@ -52,6 +52,7 @@ where
     closer: Arc<WaitQueue>,
     mtu: u16,
     consecutive_errs: usize,
+    state_notify: Option<Arc<WaitQueue>>,
 }
 
 impl TxWorker {
@@ -132,6 +133,9 @@ where
         self.nsh.stack().manage_profile(|im| {
             _ = im.deregister_interface(self.interface_id);
         });
+        if let Some(notify) = &self.state_notify {
+            notify.wake_all();
+        }
     }
 
     pub async fn run_inner(&mut self) -> ReceiverError {
@@ -227,6 +231,7 @@ pub async fn register_interface<N>(
     device: NewDevice,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
+    state_notify: Option<Arc<WaitQueue>>,
 ) -> Result<u64, Error>
 where
     N: NetStackHandle<Profile = DirectRouter<NusbBulk>>,
@@ -257,14 +262,19 @@ where
         net_id,
         biq: device.biq,
         consecutive_errs: 0,
+        state_notify,
     };
     let tx_worker = TxWorker {
         net_id,
         rx: <StdQueue as BbqHandle>::framed_consumer(&q),
-        closer,
+        closer: closer.clone(),
         boq: device.boq,
         max_usb_frame_size: device.max_packet_size,
     };
+
+    stack.stack().manage_profile(|im| {
+        im.set_interface_closer(ident, closer);
+    });
 
     tokio::task::spawn(rx_worker.run());
     tokio::task::spawn(tx_worker.run());

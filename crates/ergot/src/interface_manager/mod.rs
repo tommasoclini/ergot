@@ -231,6 +231,22 @@ pub enum InterfaceState {
     Active { net_id: u16, node_id: u8 },
 }
 
+/// Configuration for opt-in liveness tracking.
+///
+/// When enabled, the interface transitions on timeout:
+/// - **COBS stream transports** (TCP, serial, generic stream): transitions to
+///   [`InterfaceState::Inactive`]. Workers keep running and recover automatically
+///   when frames resume. Actual transport errors cause [`InterfaceState::Down`].
+/// - **UDP**: transitions to [`InterfaceState::Down`] and workers exit. UDP is
+///   connectionless, so there is no persistent connection to recover — the socket
+///   must be re-registered for the next session.
+#[derive(Clone, Debug)]
+pub struct LivenessConfig {
+    /// How long (in milliseconds) without receiving a frame before the
+    /// liveness timeout fires.
+    pub timeout_ms: u64,
+}
+
 #[cfg_attr(feature = "defmt-v1", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]

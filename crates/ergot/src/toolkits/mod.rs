@@ -244,6 +244,8 @@ pub mod tokio_tcp {
             socket,
             max_ergot_packet_size,
             outgoing_buffer_size,
+            None,
+            None,
         )
         .await
     }
@@ -253,8 +255,14 @@ pub mod tokio_tcp {
         socket: TcpStream,
         queue: &StdQueue,
     ) -> Result<(), SocketAlreadyActive> {
-        direct_edge::tokio_tcp::register_target_interface(stack.clone(), socket, queue.clone())
-            .await
+        direct_edge::tokio_tcp::register_target_interface(
+            stack.clone(),
+            socket,
+            queue.clone(),
+            None,
+            None,
+        )
+        .await
     }
 
     pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
@@ -298,6 +306,8 @@ pub mod tokio_udp {
             socket,
             max_ergot_packet_size,
             outgoing_buffer_size,
+            None,
+            None,
         )
         .await
     }
@@ -307,6 +317,8 @@ pub mod tokio_udp {
         socket: UdpSocket,
         queue: &StdQueue,
         interface_kind: InterfaceKind,
+        liveness: Option<crate::interface_manager::LivenessConfig>,
+        state_notify: Option<std::sync::Arc<crate::toolkits::tokio_stream::WaitQueue>>,
     ) -> Result<(), SocketAlreadyActive> {
         direct_edge::tokio_udp::register_interface(
             stack.clone(),
@@ -314,6 +326,8 @@ pub mod tokio_udp {
             queue.clone(),
             interface_kind,
             (),
+            liveness,
+            state_notify,
         )
         .await
     }
@@ -345,7 +359,9 @@ pub mod tokio_stream {
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
+    pub use crate::interface_manager::LivenessConfig;
     pub use crate::interface_manager::utils::std::new_std_queue;
+    pub use maitake_sync::WaitQueue;
 
     use crate::net_stack::ArcNetStack;
 
@@ -392,6 +408,7 @@ pub mod nusb_v0_1 {
             device,
             max_ergot_packet_size,
             outgoing_buffer_size,
+            None,
         )
         .await
     }
@@ -400,20 +417,14 @@ pub mod nusb_v0_1 {
 #[cfg(feature = "tokio-serial-v5")]
 pub mod tokio_serial_v5 {
     use crate::interface_manager::{
-        interface_impls::tokio_serial_cobs::TokioSerialInterface,
-        profiles::{
-            direct_edge::DirectEdge,
-            direct_router::{self, DirectRouter, tokio_serial_5::Error},
-        },
+        interface_impls::tokio_stream::TokioStreamInterface,
+        profiles::direct_router::{self, DirectRouter, tokio_serial_5::Error},
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
 
-    pub use crate::interface_manager::utils::std::new_std_queue;
-
     use crate::net_stack::ArcNetStack;
 
-    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioSerialInterface>>;
-    pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioSerialInterface>>;
+    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioStreamInterface>>;
 
     pub async fn register_router_interface(
         stack: &RouterStack,
@@ -428,6 +439,8 @@ pub mod tokio_serial_v5 {
             baud,
             max_ergot_packet_size,
             outgoing_buffer_size,
+            None,
+            None,
         )
         .await
     }
