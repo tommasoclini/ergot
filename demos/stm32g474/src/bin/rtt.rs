@@ -51,12 +51,12 @@ async fn main(spawner: Spawner) {
         ERGOT_MTU,
     ));
 
-    spawner.must_spawn(rx_task(stack, rtt_down));
-    spawner.must_spawn(tx_task(tx_queue, rtt_up));
-    spawner.must_spawn(ping_handler(stack));
+    spawner.spawn(rx_task(stack, rtt_down).unwrap());
+    spawner.spawn(tx_task(tx_queue, rtt_up).unwrap());
+    spawner.spawn(ping_handler(stack).unwrap());
 
     let led = Output::new(p.PA5, Level::Low, Speed::Low);
-    spawner.must_spawn(led_server(stack, led));
+    spawner.spawn(led_server(stack, led).unwrap());
 
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {

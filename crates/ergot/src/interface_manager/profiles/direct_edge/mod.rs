@@ -20,11 +20,17 @@ pub mod eio;
 #[cfg(feature = "embassy-usb-v0_5")]
 pub mod eusb_0_5;
 
+#[cfg(feature = "embassy-usb-v0_6")]
+pub mod eusb_0_6;
+
 #[cfg(feature = "tokio-std")]
 pub mod tokio_tcp;
 
 #[cfg(feature = "tokio-std")]
 pub mod tokio_udp;
+
+#[cfg(feature = "tokio-std")]
+pub mod tokio_stream;
 
 #[cfg(feature = "embassy-net-v0_7")]
 pub mod embassy_net_udp_0_7;
