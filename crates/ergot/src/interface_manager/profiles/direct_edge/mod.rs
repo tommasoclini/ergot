@@ -287,7 +287,7 @@ pub fn process_frame<N>(
         || net_id.is_some_and(|n| frame.hdr.dst.network_id != 0 && n != frame.hdr.dst.network_id);
 
     if take_net {
-        nsh.stack().manage_profile(|im| {
+        let ok = nsh.stack().manage_profile(|im| {
             im.set_interface_state(
                 ident.clone(),
                 InterfaceState::Active {
@@ -295,9 +295,14 @@ pub fn process_frame<N>(
                     node_id: EDGE_NODE_ID,
                 },
             )
-            .unwrap();
+            .is_ok()
         });
-        *net_id = Some(frame.hdr.dst.network_id);
+        if ok {
+            *net_id = Some(frame.hdr.dst.network_id);
+        } else {
+            warn!("Failed to set interface state from frame (wrong node_id?), dropping");
+            return;
+        }
     }
 
     // If the message comes in and has a src net_id of zero,
@@ -308,8 +313,17 @@ pub fn process_frame<N>(
     if let Some(net) = net_id.as_ref()
         && frame.hdr.src.network_id == 0
     {
-        assert_ne!(frame.hdr.src.node_id, 0, "we got a local packet remotely?");
-        assert_ne!(frame.hdr.src.node_id, 2, "someone is pretending to be us?");
+        if frame.hdr.src.node_id == 0 {
+            warn!("Dropping frame with src node_id 0 (stale or local packet received remotely)");
+            return;
+        }
+        if frame.hdr.src.node_id == EDGE_NODE_ID {
+            warn!(
+                "Dropping frame with src node_id {} (spoofed as us)",
+                EDGE_NODE_ID
+            );
+            return;
+        }
 
         frame.hdr.src.network_id = *net;
     }
