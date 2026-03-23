@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod edge_port;
 pub mod interface_impls;
+pub mod multi;
 pub mod profiles;
 pub mod utils;
 
