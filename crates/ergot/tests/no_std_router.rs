@@ -155,7 +155,7 @@ fn register_full() {
 }
 
 #[test]
-fn monotonic_idents_after_deregister() {
+fn reuses_idents_after_deregister() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut router: NoStdRouter<MockInterface, 4> = NoStdRouter::new();
 
@@ -166,11 +166,24 @@ fn monotonic_idents_after_deregister() {
 
     router.deregister_interface(id0).unwrap();
 
-    // Next registration gets ident 1, not 0
+    // Ident 0 is reused — smallest free in 0..N after deregister
     let id1 = router
         .register_interface(RecordingSink::new("b", log.clone()))
         .unwrap();
-    assert_eq!(id1, 1);
+    assert_eq!(id1, 0);
+
+    // Register another — gets ident 1
+    let id2 = router
+        .register_interface(RecordingSink::new("c", log.clone()))
+        .unwrap();
+    assert_eq!(id2, 1);
+
+    // Deregister ident 0, register again — reuses 0
+    router.deregister_interface(id1).unwrap();
+    let id3 = router
+        .register_interface(RecordingSink::new("d", log.clone()))
+        .unwrap();
+    assert_eq!(id3, 0);
 }
 
 #[test]
@@ -275,7 +288,10 @@ fn send_broadcast_goes_to_all() {
     let entries = log.lock().unwrap();
     assert_eq!(entries.len(), 3);
 
-    let labels: Vec<&str> = entries.iter().map(|e| e.split(':').next().unwrap()).collect();
+    let labels: Vec<&str> = entries
+        .iter()
+        .map(|e| e.split(':').next().unwrap())
+        .collect();
     assert!(labels.contains(&"usb"));
     assert!(labels.contains(&"uart"));
     assert!(labels.contains(&"radio"));

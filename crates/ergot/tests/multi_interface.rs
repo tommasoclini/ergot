@@ -88,8 +88,16 @@ multi_interface! {
 
 fn make_dummy_hdr() -> HeaderSeq {
     HeaderSeq {
-        src: ergot::Address { network_id: 1, node_id: 1, port_id: 1 },
-        dst: ergot::Address { network_id: 2, node_id: 2, port_id: 2 },
+        src: ergot::Address {
+            network_id: 1,
+            node_id: 1,
+            port_id: 1,
+        },
+        dst: ergot::Address {
+            network_id: 2,
+            node_id: 2,
+            port_id: 2,
+        },
         any_all: None,
         seq_no: 0,
         kind: ergot::FrameKind::ENDPOINT_REQ,

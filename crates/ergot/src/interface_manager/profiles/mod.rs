@@ -4,8 +4,8 @@
 //! as well as handling any routing outside of the device.
 
 pub mod direct_edge;
-pub mod null;
 pub mod no_std_router;
+pub mod null;
 
 #[cfg(feature = "tokio-std")]
 pub mod direct_router;

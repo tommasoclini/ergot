@@ -22,6 +22,9 @@
 
 use serde::Serialize;
 
+#[cfg(any(feature = "embedded-io-async-v0_6", feature = "embedded-io-async-v0_7"))]
+pub mod eio;
+
 use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{
@@ -52,9 +55,6 @@ struct Slot<I: Interface> {
 ///
 /// [`multi_interface!`]: crate::multi_interface
 pub struct NoStdRouter<I: Interface, const N: usize> {
-    /// Monotonic interface identifier counter. Never wraps in practice
-    /// (255 registrations on an MCU is extreme).
-    ident_ctr: u8,
     /// Monotonic network ID counter. Starts at 1 (0 is reserved for "local").
     net_id_ctr: u16,
     /// Active interface slots.
@@ -67,8 +67,6 @@ pub struct NoStdRouter<I: Interface, const N: usize> {
 pub enum RegisterError {
     /// All `N` slots are occupied.
     Full,
-    /// The monotonic identifier counter has been exhausted (255 registrations).
-    IdentsExhausted,
     /// The monotonic net_id counter has been exhausted.
     NetIdsExhausted,
 }
@@ -81,11 +79,16 @@ pub enum DeregisterError {
     NotFound,
 }
 
+impl<I: Interface, const N: usize> Default for NoStdRouter<I, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<I: Interface, const N: usize> NoStdRouter<I, N> {
     /// Create a new empty router.
     pub const fn new() -> Self {
         Self {
-            ident_ctr: 0,
             net_id_ctr: 1,
             slots: heapless::Vec::new(),
         }
@@ -93,24 +96,28 @@ impl<I: Interface, const N: usize> NoStdRouter<I, N> {
 
     /// Register a new downstream interface.
     ///
-    /// Assigns a monotonic ident and a unique net_id. The interface starts
+    /// Assigns a reusable ident and a unique net_id. The interface starts
     /// in [`InterfaceState::Active`] with [`CENTRAL_NODE_ID`] as the local
     /// node.
     ///
     /// Returns the assigned ident on success.
-    pub fn register_interface(
-        &mut self,
-        sink: I::Sink,
-    ) -> Result<u8, RegisterError> {
+    pub fn register_interface(&mut self, sink: I::Sink) -> Result<u8, RegisterError> {
         if self.slots.is_full() {
             return Err(RegisterError::Full);
         }
 
-        let ident = self.ident_ctr;
-        self.ident_ctr = self
-            .ident_ctr
-            .checked_add(1)
-            .ok_or(RegisterError::IdentsExhausted)?;
+        // Find the smallest available ident by scanning 0..N.
+        //
+        // By the pigeonhole principle, if there are fewer than N slots occupied,
+        // at least one value in 0..N is unused — so this search always succeeds
+        // when the vec is not full (which we checked above).
+        //
+        // This allows ident reuse after deregister, avoiding the u8 counter
+        // exhaustion problem on long-running embedded devices with frequent
+        // connect/disconnect cycles.
+        let ident = (0..N as u8)
+            .find(|id| !self.slots.iter().any(|s| s.ident == *id))
+            .expect("pigeonhole: fewer than N slots occupied, so a free ident in 0..N must exist");
 
         let net_id = self.net_id_ctr;
         // net_id 0 and 65535 are reserved
@@ -183,10 +190,10 @@ impl<I: Interface, const N: usize> NoStdRouter<I, N> {
         }
 
         // Routing loop: packet came in on this same interface
-        if let Some(src_ident) = source {
-            if slot.ident == src_ident {
-                return Err(InterfaceSendError::RoutingLoop);
-            }
+        if let Some(src_ident) = source
+            && slot.ident == src_ident
+        {
+            return Err(InterfaceSendError::RoutingLoop);
         }
 
         Ok(&mut self.slots[pos].port)
@@ -200,11 +207,7 @@ impl<I: Interface, const N: usize> ConstInit for NoStdRouter<I, N> {
 impl<I: Interface, const N: usize> Profile for NoStdRouter<I, N> {
     type InterfaceIdent = u8;
 
-    fn send<T: Serialize>(
-        &mut self,
-        hdr: &Header,
-        data: &T,
-    ) -> Result<(), InterfaceSendError> {
+    fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError> {
         let mut hdr = hdr.clone();
         if hdr.decrement_ttl().is_err() {
             return Err(InterfaceSendError::NoRouteToDest);
@@ -284,11 +287,7 @@ impl<I: Interface, const N: usize> Profile for NoStdRouter<I, N> {
                 hdr.dst.node_id = EDGE_NODE_ID;
                 any_good |= slot.port.send_raw(&hdr, data).is_ok();
             }
-            if any_good {
-                Ok(())
-            } else {
-                Err(default_error)
-            }
+            if any_good { Ok(()) } else { Err(default_error) }
         } else {
             let nshdr: Header = hdr.clone().into();
             let port = self.find(&nshdr, Some(source))?;
@@ -349,10 +348,7 @@ pub fn process_frame<N>(
                 return;
             }
             CENTRAL_NODE_ID => {
-                warn!(
-                    "{}: device is sending us frames as us, ignoring",
-                    frame.hdr
-                );
+                warn!("{}: device is sending us frames as us, ignoring", frame.hdr);
                 return;
             }
             EDGE_NODE_ID => {}

@@ -24,8 +24,7 @@ use crate::{
     interface_manager::{
         DeregisterError, Interface, InterfaceSendError, InterfaceState, Profile,
         SeedAssignmentError, SeedNetAssignment, SeedRefreshError, SetStateError,
-        edge_port::EdgePort,
-        profiles::direct_edge::CENTRAL_NODE_ID,
+        edge_port::EdgePort, profiles::direct_edge::CENTRAL_NODE_ID,
     },
     net_stack::NetStackHandle,
     wire_frames::de_frame,
@@ -616,5 +615,3 @@ pub fn process_frame<N>(
         warn!("Decode error! Ignoring frame on net_id {}", net_id);
     }
 }
-
-

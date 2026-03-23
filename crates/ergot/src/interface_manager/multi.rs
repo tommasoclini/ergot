@@ -1,10 +1,9 @@
-/// Generate a combined [`Interface`] + [`InterfaceSink`] enum from multiple
-/// interface types.
+/// Generate a combined interface enum from multiple interface types.
 ///
 /// This macro creates:
-/// - A zero-sized struct implementing [`Interface`] (the "interface marker")
-/// - An enum implementing [`InterfaceSink`] whose variants each wrap the
-///   [`Sink`](Interface::Sink) of the corresponding interface type
+/// - A zero-sized struct implementing `Interface` (the "interface marker")
+/// - An enum implementing `InterfaceSink` whose variants each wrap the
+///   `Sink` of the corresponding interface type
 ///
 /// # Example
 ///

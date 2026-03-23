@@ -168,11 +168,7 @@ impl<I: Interface> EdgePort<I> {
     /// Send a serializable message through this port.
     ///
     /// The caller must decrement TTL before calling.
-    pub fn send<T: Serialize>(
-        &mut self,
-        hdr: &Header,
-        data: &T,
-    ) -> Result<(), InterfaceSendError> {
+    pub fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError> {
         let (sink, header) = self.common_send(hdr)?;
         sink.send_ty(&header, data)
             .map_err(|()| InterfaceSendError::InterfaceFull)
@@ -181,11 +177,7 @@ impl<I: Interface> EdgePort<I> {
     /// Send a protocol error through this port.
     ///
     /// The caller must decrement TTL before calling.
-    pub fn send_err(
-        &mut self,
-        hdr: &Header,
-        err: ProtocolError,
-    ) -> Result<(), InterfaceSendError> {
+    pub fn send_err(&mut self, hdr: &Header, err: ProtocolError) -> Result<(), InterfaceSendError> {
         let (sink, header) = self.common_send(hdr)?;
         sink.send_err(&header, err)
             .map_err(|()| InterfaceSendError::InterfaceFull)
@@ -197,11 +189,7 @@ impl<I: Interface> EdgePort<I> {
     /// [`HeaderSeq`] because raw messages have already been assigned a
     /// sequence number by the originator; however, `common_send` may
     /// reassign one.
-    pub fn send_raw(
-        &mut self,
-        hdr: &HeaderSeq,
-        data: &[u8],
-    ) -> Result<(), InterfaceSendError> {
+    pub fn send_raw(&mut self, hdr: &HeaderSeq, data: &[u8]) -> Result<(), InterfaceSendError> {
         let nshdr: Header = hdr.clone().into();
         let (sink, header) = self.common_send(&nshdr)?;
         sink.send_raw(&header, data)

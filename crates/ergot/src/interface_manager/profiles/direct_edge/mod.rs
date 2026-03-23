@@ -38,8 +38,7 @@ pub mod embassy_net_udp_0_7;
 use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{
-        Interface, InterfaceSendError, InterfaceState, Profile, SetStateError,
-        edge_port::EdgePort,
+        Interface, InterfaceSendError, InterfaceState, Profile, SetStateError, edge_port::EdgePort,
     },
     net_stack::NetStackHandle,
     wire_frames::de_frame,
