@@ -10,7 +10,7 @@ use tokio::{net::UdpSocket, select};
 
 use crate::{
     interface_manager::{
-        InterfaceState, Profile,
+        InterfaceState, LivenessConfig, Profile,
         interface_impls::tokio_udp::TokioUdpInterface,
         profiles::direct_router::{DirectRouter, process_frame},
         utils::{
@@ -43,6 +43,8 @@ where
     nsh: N,
     skt: Arc<UdpSocket>,
     closer: Arc<WaitQueue>,
+    liveness: Option<LivenessConfig>,
+    state_notify: Option<Arc<WaitQueue>>,
 }
 
 impl TxWorker {
@@ -100,41 +102,112 @@ where
         self.nsh.stack().manage_profile(|im| {
             _ = im.deregister_interface(self.interface_id);
         });
+        if let Some(notify) = &self.state_notify {
+            notify.wake_all();
+        }
     }
 
     pub async fn run_inner(&mut self) -> ReceiverError {
         let mut raw_buf = vec![0u8; 4096].into_boxed_slice();
+        let mut have_received = false;
 
         loop {
             let rd = self.skt.recv_from(&mut raw_buf);
             let close = self.closer.wait();
 
-            let ct = select! {
-                r = rd => {
-                    match r {
-                        Ok((0, _)) => {
-                            warn!("received nothing, retrying");
-                            continue
-                        },
-                        Err(e) => {
-                            warn!("receiver error, retrying. error: {}, kind: {}", e, e.kind());
-                            continue
-                        },
-                        Ok((ct, remote_address)) => {
-                            // TODO ensure the remote address is allowed to connect to this router
-                            //      this implementation blindly accepts all connections
-                            trace!("received {} bytes from {}", ct, remote_address);
-                            ct
-                        },
+            let liveness_active = self.liveness.is_some() && have_received;
+
+            let ct = if liveness_active {
+                let liveness = self.liveness.as_ref().unwrap();
+                let timeout =
+                    tokio::time::sleep(tokio::time::Duration::from_millis(liveness.timeout_ms));
+
+                select! {
+                    r = rd => {
+                        match r {
+                            Ok((0, _)) => {
+                                warn!("received nothing, retrying");
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!("receiver error, retrying. error: {}, kind: {}", e, e.kind());
+                                continue;
+                            }
+                            Ok((ct, remote_address)) => {
+                                trace!("received {} bytes from {}", ct, remote_address);
+                                ct
+                            }
+                        }
+                    }
+                    _c = close => {
+                        return ReceiverError::SocketClosed;
+                    }
+                    _ = timeout => {
+                        // UDP is connectionless — no persistent connection to recover.
+                        // Transition to Down so workers exit and the socket is clean.
+                        warn!("Liveness timeout for net_id {}", self.net_id);
+                        self.nsh.stack().manage_profile(|im| {
+                            _ = im.set_interface_state(
+                                self.interface_id,
+                                InterfaceState::Down,
+                            );
+                        });
+                        if let Some(notify) = &self.state_notify {
+                            notify.wake_all();
+                        }
+                        return ReceiverError::SocketClosed;
                     }
                 }
-                _c = close => {
-                    return ReceiverError::SocketClosed;
+            } else {
+                select! {
+                    r = rd => {
+                        match r {
+                            Ok((0, _)) => {
+                                warn!("received nothing, retrying");
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!("receiver error, retrying. error: {}, kind: {}", e, e.kind());
+                                continue;
+                            }
+                            Ok((ct, remote_address)) => {
+                                trace!("received {} bytes from {}", ct, remote_address);
+                                ct
+                            }
+                        }
+                    }
+                    _c = close => {
+                        return ReceiverError::SocketClosed;
+                    }
                 }
             };
 
             let buf = &mut raw_buf[..ct];
             process_frame(self.net_id, buf, &self.nsh, self.interface_id);
+
+            if !have_received {
+                let changed = self.nsh.stack().manage_profile(|im| {
+                    if matches!(
+                        im.interface_state(self.interface_id),
+                        Some(InterfaceState::Inactive)
+                    ) {
+                        _ = im.set_interface_state(
+                            self.interface_id,
+                            InterfaceState::Active {
+                                net_id: self.net_id,
+                                node_id: crate::interface_manager::profiles::direct_edge::CENTRAL_NODE_ID,
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if changed && let Some(notify) = &self.state_notify {
+                    notify.wake_all();
+                }
+            }
+            have_received = true;
         }
     }
 }
@@ -144,6 +217,8 @@ pub async fn register_interface<N>(
     socket: UdpSocket,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
+    liveness: Option<LivenessConfig>,
+    state_notify: Option<Arc<WaitQueue>>,
 ) -> Result<u64, Error>
 where
     N: NetStackHandle<Profile = DirectRouter<TokioUdpInterface>>,
@@ -175,13 +250,19 @@ where
         closer: closer.clone(),
         interface_id: ident,
         net_id,
+        liveness,
+        state_notify,
     };
     let tx_worker = TxWorker {
         net_id,
         tx,
         rx: <StdQueue as BbqHandle>::framed_consumer(&q),
-        closer,
+        closer: closer.clone(),
     };
+
+    stack.stack().manage_profile(|im| {
+        im.set_interface_closer(ident, closer);
+    });
 
     tokio::task::spawn(rx_worker.run());
     tokio::task::spawn(tx_worker.run());

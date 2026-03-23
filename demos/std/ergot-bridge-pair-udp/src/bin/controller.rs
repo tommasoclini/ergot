@@ -34,7 +34,7 @@ async fn main() -> io::Result<()> {
     tokio::task::spawn(yeeter(stack.clone()));
     tokio::task::spawn(yeet_listener(stack.clone(), 0));
 
-    register_edge_interface(&stack, udp_socket, &queue, InterfaceKind::Controller)
+    register_edge_interface(&stack, udp_socket, &queue, InterfaceKind::Controller, None, None)
         .await
         .unwrap();
 

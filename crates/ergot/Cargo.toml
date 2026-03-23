@@ -62,6 +62,9 @@ embedded-io-async-v0_6 = [
 embedded-io-async-v0_7 = [
     "dep:embedded-io-async-0_7",
 ]
+embassy-time = [
+    "dep:embassy-time",
+]
 nusb-v0_1 = [
     "tokio-std",
     "dep:nusb",

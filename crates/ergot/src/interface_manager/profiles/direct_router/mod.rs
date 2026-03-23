@@ -33,6 +33,8 @@ use crate::{
 use super::direct_edge::EDGE_NODE_ID;
 
 #[cfg(feature = "tokio-std")]
+pub mod tokio_stream;
+#[cfg(feature = "tokio-std")]
 pub mod tokio_tcp;
 #[cfg(feature = "tokio-std")]
 pub mod tokio_udp;
@@ -48,6 +50,8 @@ struct Node<I: Interface> {
     edge: edge_interface_plus::EdgeInterfacePlus<I>,
     net_id: u16,
     ident: u64,
+    #[cfg(feature = "std")]
+    closer: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
 }
 
 /// The "kind" of route, currently only "directly connected and assigned by us",
@@ -471,6 +475,8 @@ impl<I: Interface> DirectRouter<I> {
                 ),
                 net_id,
                 ident: intfc_id,
+                #[cfg(feature = "std")]
+                closer: None,
             },
         );
         self.routes.insert(
@@ -483,10 +489,28 @@ impl<I: Interface> DirectRouter<I> {
         Some(intfc_id)
     }
 
+    /// Store a closer WaitQueue for an interface, so that workers are
+    /// notified when the interface is deregistered.
+    #[cfg(feature = "std")]
+    pub fn set_interface_closer(
+        &mut self,
+        ident: u64,
+        closer: std::sync::Arc<maitake_sync::WaitQueue>,
+    ) {
+        if let Some(node) = self.direct_links.get_mut(&ident) {
+            node.closer = Some(closer);
+        }
+    }
+
     pub fn deregister_interface(&mut self, ident: u64) -> Result<(), DeregisterError> {
         let Some(node) = self.direct_links.remove(&ident) else {
             return Err(DeregisterError::NoSuchInterface);
         };
+        // Signal workers to stop
+        #[cfg(feature = "std")]
+        if let Some(closer) = &node.closer {
+            closer.close();
+        }
         if let Some(rte) = self.routes.remove(&node.net_id) {
             debug!(
                 "removing interface with net_id: {}, ident: {:?}",

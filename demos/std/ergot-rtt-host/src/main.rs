@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
     });
 
     // Register with ergot's tokio_stream toolkit — handles all COBS framing
-    stream_kit::register_controller_stream(stack.clone(), reader, writer, queue)
+    stream_kit::register_controller_stream(stack.clone(), reader, writer, queue, None, None)
         .await
         .map_err(|_| anyhow!("Interface already active"))?;
 

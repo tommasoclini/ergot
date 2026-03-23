@@ -59,6 +59,10 @@ pub struct DirectEdge<I: Interface> {
     state: InterfaceState,
     own_node_id: u8,
     other_node_id: u8,
+    /// Closer for signaling workers to stop. Set by `register_*_stream`,
+    /// closed when the interface transitions to `Down`.
+    #[cfg(feature = "std")]
+    closer: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
 }
 
 impl<I: Interface> DirectEdge<I> {
@@ -69,6 +73,8 @@ impl<I: Interface> DirectEdge<I> {
             state: InterfaceState::Down,
             own_node_id: EDGE_NODE_ID,
             other_node_id: CENTRAL_NODE_ID,
+            #[cfg(feature = "std")]
+            closer: None,
         }
     }
 
@@ -79,7 +85,32 @@ impl<I: Interface> DirectEdge<I> {
             state,
             own_node_id: CENTRAL_NODE_ID,
             other_node_id: EDGE_NODE_ID,
+            #[cfg(feature = "std")]
+            closer: None,
         }
+    }
+
+    /// Tear down the interface: stop any running workers and transition to `Down`.
+    ///
+    /// Call this before re-opening a transport to ensure the old workers
+    /// release the transport resource (e.g., serial port).
+    #[cfg(feature = "std")]
+    pub fn teardown(&mut self) {
+        if let Some(closer) = self.closer.take() {
+            closer.close();
+        }
+        self.state = InterfaceState::Down;
+    }
+
+    /// Store a closer WaitQueue so that workers are signaled when the
+    /// interface transitions to `Down` or when a new stream is registered.
+    #[cfg(feature = "std")]
+    pub fn set_closer(&mut self, closer: std::sync::Arc<maitake_sync::WaitQueue>) {
+        // Close any existing workers before replacing
+        if let Some(old) = self.closer.take() {
+            old.close();
+        }
+        self.closer = Some(closer);
     }
 }
 
@@ -256,7 +287,7 @@ pub fn process_frame<N>(
         || net_id.is_some_and(|n| frame.hdr.dst.network_id != 0 && n != frame.hdr.dst.network_id);
 
     if take_net {
-        nsh.stack().manage_profile(|im| {
+        let ok = nsh.stack().manage_profile(|im| {
             im.set_interface_state(
                 ident.clone(),
                 InterfaceState::Active {
@@ -264,9 +295,14 @@ pub fn process_frame<N>(
                     node_id: EDGE_NODE_ID,
                 },
             )
-            .unwrap();
+            .is_ok()
         });
-        *net_id = Some(frame.hdr.dst.network_id);
+        if ok {
+            *net_id = Some(frame.hdr.dst.network_id);
+        } else {
+            warn!("Failed to set interface state from frame (wrong node_id?), dropping");
+            return;
+        }
     }
 
     // If the message comes in and has a src net_id of zero,
@@ -277,8 +313,17 @@ pub fn process_frame<N>(
     if let Some(net) = net_id.as_ref()
         && frame.hdr.src.network_id == 0
     {
-        assert_ne!(frame.hdr.src.node_id, 0, "we got a local packet remotely?");
-        assert_ne!(frame.hdr.src.node_id, 2, "someone is pretending to be us?");
+        if frame.hdr.src.node_id == 0 {
+            warn!("Dropping frame with src node_id 0 (stale or local packet received remotely)");
+            return;
+        }
+        if frame.hdr.src.node_id == EDGE_NODE_ID {
+            warn!(
+                "Dropping frame with src node_id {} (spoofed as us)",
+                EDGE_NODE_ID
+            );
+            return;
+        }
 
         frame.hdr.src.network_id = *net;
     }
