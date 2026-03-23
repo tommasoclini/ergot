@@ -5,6 +5,7 @@
 
 pub mod direct_edge;
 pub mod null;
+pub mod no_std_router;
 
 #[cfg(feature = "tokio-std")]
 pub mod direct_router;
