@@ -55,33 +55,12 @@ fn spawn_ping_server(stack: &EdgeStackTy) {
     });
 }
 
-async fn ping_with_retry_generic<N: NetStackHandle + Clone>(
-    stack: &N,
-    addr: Address,
-    val: u32,
-) -> u32 {
+async fn ping_with_retry<N: NetStackHandle + Clone>(stack: &N, addr: Address, val: u32) -> u32 {
     for _ in 0..30 {
         let result = timeout(
             Duration::from_millis(500),
             stack
                 .stack()
-                .endpoints()
-                .request::<ErgotPingEndpoint>(addr, &val, Some("ping")),
-        )
-        .await;
-        match result {
-            Ok(Ok(v)) => return v,
-            _ => sleep(Duration::from_millis(100)).await,
-        }
-    }
-    panic!("ping failed after retries");
-}
-
-async fn ping_with_retry(stack: &EdgeStackTy, addr: Address, val: u32) -> u32 {
-    for _ in 0..30 {
-        let result = timeout(
-            Duration::from_millis(500),
-            stack
                 .endpoints()
                 .request::<ErgotPingEndpoint>(addr, &val, Some("ping")),
         )
@@ -196,8 +175,8 @@ async fn edge_to_edge_through_router() {
     };
 
     // Send pings from router to bootstrap both edges
-    ping_with_retry_generic(&router_stack, edge1_addr, 0).await;
-    ping_with_retry_generic(&router_stack, edge2_addr, 0).await;
+    ping_with_retry(&router_stack, edge1_addr, 0).await;
+    ping_with_retry(&router_stack, edge2_addr, 0).await;
 
     // Now edges should be Active
     wait_active(&edge1_stack).await;
@@ -291,8 +270,8 @@ async fn bidirectional_through_router() {
         port_id: 0,
     };
 
-    ping_with_retry_generic(&router_stack, edge1_addr, 0).await;
-    ping_with_retry_generic(&router_stack, edge2_addr, 0).await;
+    ping_with_retry(&router_stack, edge1_addr, 0).await;
+    ping_with_retry(&router_stack, edge2_addr, 0).await;
 
     wait_active(&edge1_stack).await;
     wait_active(&edge2_stack).await;

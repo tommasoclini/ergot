@@ -235,6 +235,7 @@ pub async fn register_edge<N, I>(
     stack: N,
     device: NewDevice,
     queue: StdQueue,
+    max_ergot_packet_size: u16,
     state_notify: Option<Arc<WaitQueue>>,
 ) -> Result<(), EdgeRegistrationError>
 where
@@ -265,7 +266,7 @@ where
         closer: closer.clone(),
         processor: EdgeFrameProcessor::new(),
         ident: (),
-        mtu: 1024,
+        mtu: max_ergot_packet_size,
         state_notify,
     };
 

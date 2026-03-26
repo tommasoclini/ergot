@@ -473,12 +473,14 @@ pub mod nusb_v0_1 {
         stack: &EdgeStack,
         device: NewDevice,
         queue: &StdQueue,
+        max_ergot_packet_size: u16,
         state_notify: Option<Arc<maitake_sync::WaitQueue>>,
     ) -> Result<(), nusb_transport::EdgeRegistrationError> {
         nusb_transport::register_edge::<_, NusbBulk>(
             stack.clone(),
             device,
             queue.clone(),
+            max_ergot_packet_size,
             state_notify,
         )
         .await
