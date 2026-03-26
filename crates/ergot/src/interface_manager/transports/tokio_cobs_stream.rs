@@ -1,7 +1,7 @@
 //! Generic tokio COBS stream transport.
 //!
 //! Provides generic RxWorker, TxWorker, and profile-specific registration
-//! functions for any [`AsyncRead`]/[`AsyncWrite`] COBS-framed transport
+//! functions for any `AsyncRead`/`AsyncWrite` COBS-framed transport
 //! (TCP, serial, generic streams).
 //!
 //! [`FrameProcessor`]: crate::interface_manager::FrameProcessor

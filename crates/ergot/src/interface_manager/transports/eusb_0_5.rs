@@ -23,7 +23,7 @@ use maitake_sync::WaitQueue;
 /// A generic USB bulk endpoint RxWorker.
 ///
 /// Reads USB bulk frames, detects USB suspend/resume via
-/// [`USB_SUSPEND`] watch, and feeds decoded frames to a
+/// `USB_SUSPEND` watch, and feeds decoded frames to a
 /// [`FrameProcessor`].
 pub struct RxWorker<N, D, P>
 where
