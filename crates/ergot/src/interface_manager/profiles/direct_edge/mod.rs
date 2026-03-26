@@ -159,9 +159,16 @@ pub struct EdgeFrameProcessor {
 }
 
 impl EdgeFrameProcessor {
-    /// Create a new processor with no discovered net_id.
+    /// Create a new processor with no discovered net_id (target mode).
     pub fn new() -> Self {
         Self { net_id: None }
+    }
+
+    /// Create a new processor with a pre-set net_id (controller mode).
+    pub fn new_controller(net_id: u16) -> Self {
+        Self {
+            net_id: Some(net_id),
+        }
     }
 }
 
