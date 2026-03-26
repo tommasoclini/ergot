@@ -24,18 +24,6 @@ pub type EmbeddedIoManager<Q> =
 pub type EmbassyUsbManager<Q> =
     DirectEdge<crate::interface_manager::interface_impls::embassy_usb::EmbassyInterface<Q>>;
 
-#[cfg(feature = "tokio-std")]
-pub mod tokio_tcp;
-
-#[cfg(feature = "tokio-std")]
-pub mod tokio_udp;
-
-#[cfg(feature = "tokio-std")]
-pub mod tokio_stream;
-
-#[cfg(feature = "embassy-net-v0_7")]
-pub mod embassy_net_udp_0_7;
-
 use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{

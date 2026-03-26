@@ -200,11 +200,11 @@ pub mod embassy_net_v0_7 {
 #[cfg(feature = "tokio-std")]
 pub mod tokio_tcp {
     use crate::interface_manager::{
+        InterfaceState,
         interface_impls::tokio_tcp::TokioTcpInterface,
-        profiles::{
-            direct_edge::{self, DirectEdge, tokio_tcp::SocketAlreadyActive},
-            direct_router::{self, DirectRouter, tokio_tcp::Error},
-        },
+        profiles::direct_edge::{DirectEdge, EdgeFrameProcessor},
+        profiles::direct_router::DirectRouter,
+        transports::tokio_cobs_stream,
         utils::{cobs_stream, std::StdQueue},
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
@@ -222,10 +222,12 @@ pub mod tokio_tcp {
         socket: TcpStream,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, Error> {
-        direct_router::tokio_tcp::register_interface(
+    ) -> Result<u64, tokio_cobs_stream::RouterRegistrationError> {
+        let (rx, tx) = socket.into_split();
+        tokio_cobs_stream::register_router::<_, TokioTcpInterface, _, _>(
             stack.clone(),
-            socket,
+            rx,
+            tx,
             max_ergot_packet_size,
             outgoing_buffer_size,
             None,
@@ -238,11 +240,15 @@ pub mod tokio_tcp {
         stack: &EdgeStack,
         socket: TcpStream,
         queue: &StdQueue,
-    ) -> Result<(), SocketAlreadyActive> {
-        direct_edge::tokio_tcp::register_target_interface(
+    ) -> Result<(), tokio_cobs_stream::EdgeRegistrationError> {
+        let (rx, tx) = socket.into_split();
+        tokio_cobs_stream::register_edge::<_, TokioTcpInterface, _, _>(
             stack.clone(),
-            socket,
+            rx,
+            tx,
             queue.clone(),
+            EdgeFrameProcessor::new(),
+            InterfaceState::Inactive,
             None,
             None,
         )
@@ -259,20 +265,18 @@ pub mod tokio_tcp {
 
 #[cfg(feature = "tokio-std")]
 pub mod tokio_udp {
-    use crate::interface_manager::profiles::direct_edge::tokio_udp::InterfaceKind;
-    use crate::interface_manager::profiles::direct_router;
-    use crate::interface_manager::profiles::direct_router::DirectRouter;
-    use crate::interface_manager::profiles::direct_router::tokio_udp::Error;
-    use crate::interface_manager::utils::framed_stream;
-    pub use crate::interface_manager::utils::std::new_std_queue;
     use crate::interface_manager::{
         InterfaceState,
         interface_impls::tokio_udp::TokioUdpInterface,
-        profiles::direct_edge::{self, DirectEdge, tokio_udp::SocketAlreadyActive},
-        utils::std::StdQueue,
+        profiles::direct_edge::{CENTRAL_NODE_ID, DirectEdge, EdgeFrameProcessor},
+        profiles::direct_router::DirectRouter,
+        transports::tokio_udp as udp_transport,
+        utils::{framed_stream, std::StdQueue},
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
     use tokio::net::UdpSocket;
+
+    pub use crate::interface_manager::utils::std::new_std_queue;
 
     use crate::net_stack::ArcNetStack;
 
@@ -284,8 +288,8 @@ pub mod tokio_udp {
         socket: UdpSocket,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, Error> {
-        direct_router::tokio_udp::register_interface(
+    ) -> Result<u64, udp_transport::RouterRegistrationError> {
+        udp_transport::register_router::<_, TokioUdpInterface>(
             stack.clone(),
             socket,
             max_ergot_packet_size,
@@ -296,37 +300,55 @@ pub mod tokio_udp {
         .await
     }
 
-    pub async fn register_edge_interface(
+    pub async fn register_edge_target_interface(
         stack: &EdgeStack,
         socket: UdpSocket,
         queue: &StdQueue,
-        interface_kind: InterfaceKind,
         liveness: Option<crate::interface_manager::LivenessConfig>,
-        state_notify: Option<std::sync::Arc<crate::toolkits::tokio_stream::WaitQueue>>,
-    ) -> Result<(), SocketAlreadyActive> {
-        direct_edge::tokio_udp::register_interface(
+        state_notify: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
+    ) -> Result<(), udp_transport::EdgeRegistrationError> {
+        udp_transport::register_edge::<_, TokioUdpInterface>(
             stack.clone(),
             socket,
             queue.clone(),
-            interface_kind,
-            (),
+            EdgeFrameProcessor::new(),
+            InterfaceState::Inactive,
             liveness,
             state_notify,
         )
         .await
     }
 
-    pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> crate::toolkits::tokio_udp::EdgeStack {
-        crate::toolkits::tokio_udp::EdgeStack::new_with_profile(DirectEdge::new_target(
+    pub async fn register_edge_controller_interface(
+        stack: &EdgeStack,
+        socket: UdpSocket,
+        queue: &StdQueue,
+        liveness: Option<crate::interface_manager::LivenessConfig>,
+        state_notify: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
+    ) -> Result<(), udp_transport::EdgeRegistrationError> {
+        udp_transport::register_edge::<_, TokioUdpInterface>(
+            stack.clone(),
+            socket,
+            queue.clone(),
+            EdgeFrameProcessor::new_controller(1),
+            InterfaceState::Active {
+                net_id: 1,
+                node_id: CENTRAL_NODE_ID,
+            },
+            liveness,
+            state_notify,
+        )
+        .await
+    }
+
+    pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
+        EdgeStack::new_with_profile(DirectEdge::new_target(
             framed_stream::Sink::new_from_handle(queue.clone(), mtu),
         ))
     }
 
-    pub fn new_controller_stack(
-        queue: &StdQueue,
-        mtu: u16,
-    ) -> crate::toolkits::tokio_udp::EdgeStack {
-        crate::toolkits::tokio_udp::EdgeStack::new_with_profile(DirectEdge::new_controller(
+    pub fn new_controller_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
+        EdgeStack::new_with_profile(DirectEdge::new_controller(
             framed_stream::Sink::new_from_handle(queue.clone(), mtu),
             InterfaceState::Down,
         ))
@@ -338,10 +360,13 @@ pub mod tokio_stream {
     use crate::interface_manager::{
         InterfaceState,
         interface_impls::tokio_stream::TokioStreamInterface,
-        profiles::direct_edge::{self, DirectEdge},
+        profiles::direct_edge::{CENTRAL_NODE_ID, DirectEdge, EdgeFrameProcessor},
+        transports::tokio_cobs_stream,
         utils::{cobs_stream, std::StdQueue},
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use std::sync::Arc;
+    use tokio::io::{AsyncRead, AsyncWrite};
 
     pub use crate::interface_manager::LivenessConfig;
     pub use crate::interface_manager::utils::std::new_std_queue;
@@ -351,7 +376,50 @@ pub mod tokio_stream {
 
     pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioStreamInterface>>;
 
-    pub use direct_edge::tokio_stream::{register_controller_stream, register_target_stream};
+    pub async fn register_target_stream(
+        stack: EdgeStack,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        queue: StdQueue,
+        liveness: Option<LivenessConfig>,
+        state_notify: Option<Arc<WaitQueue>>,
+    ) -> Result<(), tokio_cobs_stream::EdgeRegistrationError> {
+        tokio_cobs_stream::register_edge::<_, TokioStreamInterface, _, _>(
+            stack,
+            reader,
+            writer,
+            queue,
+            EdgeFrameProcessor::new(),
+            InterfaceState::Inactive,
+            liveness,
+            state_notify,
+        )
+        .await
+    }
+
+    pub async fn register_controller_stream(
+        stack: EdgeStack,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        queue: StdQueue,
+        liveness: Option<LivenessConfig>,
+        state_notify: Option<Arc<WaitQueue>>,
+    ) -> Result<(), tokio_cobs_stream::EdgeRegistrationError> {
+        tokio_cobs_stream::register_edge::<_, TokioStreamInterface, _, _>(
+            stack,
+            reader,
+            writer,
+            queue,
+            EdgeFrameProcessor::new_controller(1),
+            InterfaceState::Active {
+                net_id: 1,
+                node_id: CENTRAL_NODE_ID,
+            },
+            liveness,
+            state_notify,
+        )
+        .await
+    }
 
     pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
         EdgeStack::new_with_profile(DirectEdge::new_target(cobs_stream::Sink::new_from_handle(
@@ -371,28 +439,47 @@ pub mod tokio_stream {
 #[cfg(feature = "nusb-v0_1")]
 pub mod nusb_v0_1 {
     use crate::interface_manager::{
-        interface_impls::nusb_bulk::NusbBulk,
-        profiles::direct_router::{self, DirectRouter, nusb_0_1::Error},
+        interface_impls::nusb_bulk::NusbBulk, profiles::direct_edge::DirectEdge,
+        profiles::direct_router::DirectRouter, transports::nusb as nusb_transport,
+        utils::std::StdQueue,
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use std::sync::Arc;
 
     use crate::net_stack::ArcNetStack;
 
     pub use crate::interface_manager::interface_impls::nusb_bulk::{NewDevice, find_new_devices};
 
     pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<NusbBulk>>;
+    pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<NusbBulk>>;
+
     pub async fn register_router_interface(
         stack: &RouterStack,
         device: NewDevice,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, Error> {
-        direct_router::nusb_0_1::register_interface(
+    ) -> Result<u64, nusb_transport::RouterRegistrationError> {
+        nusb_transport::register_router::<_, NusbBulk>(
             stack.clone(),
             device,
             max_ergot_packet_size,
             outgoing_buffer_size,
             None,
+        )
+        .await
+    }
+
+    pub async fn register_edge_interface(
+        stack: &EdgeStack,
+        device: NewDevice,
+        queue: &StdQueue,
+        state_notify: Option<Arc<maitake_sync::WaitQueue>>,
+    ) -> Result<(), nusb_transport::EdgeRegistrationError> {
+        nusb_transport::register_edge::<_, NusbBulk>(
+            stack.clone(),
+            device,
+            queue.clone(),
+            state_notify,
         )
         .await
     }
@@ -402,13 +489,18 @@ pub mod nusb_v0_1 {
 pub mod tokio_serial_v5 {
     use crate::interface_manager::{
         interface_impls::tokio_stream::TokioStreamInterface,
-        profiles::direct_router::{self, DirectRouter, tokio_serial_5::Error},
+        profiles::direct_edge::DirectEdge,
+        profiles::direct_router::DirectRouter,
+        transports::tokio_serial,
+        utils::{cobs_stream, std::StdQueue},
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
+    use std::sync::Arc;
 
     use crate::net_stack::ArcNetStack;
 
     pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioStreamInterface>>;
+    pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioStreamInterface>>;
 
     pub async fn register_router_interface(
         stack: &RouterStack,
@@ -416,8 +508,8 @@ pub mod tokio_serial_v5 {
         baud: u32,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, Error> {
-        direct_router::tokio_serial_5::register_interface(
+    ) -> Result<u64, tokio_serial::RouterRegistrationError> {
+        tokio_serial::register_router::<_, TokioStreamInterface>(
             stack.clone(),
             port,
             baud,
@@ -427,5 +519,33 @@ pub mod tokio_serial_v5 {
             None,
         )
         .await
+    }
+
+    pub async fn register_edge_interface(
+        stack: &EdgeStack,
+        port: &str,
+        baud: u32,
+        queue: &StdQueue,
+        liveness: Option<crate::interface_manager::LivenessConfig>,
+        state_notify: Option<Arc<maitake_sync::WaitQueue>>,
+    ) -> Result<(), tokio_serial::EdgeRegistrationError> {
+        tokio_serial::register_edge::<_, TokioStreamInterface>(
+            stack.clone(),
+            port,
+            baud,
+            queue.clone(),
+            crate::interface_manager::profiles::direct_edge::EdgeFrameProcessor::new(),
+            crate::interface_manager::InterfaceState::Inactive,
+            liveness,
+            state_notify,
+        )
+        .await
+    }
+
+    pub fn new_target_stack(queue: &StdQueue, mtu: u16) -> EdgeStack {
+        EdgeStack::new_with_profile(DirectEdge::new_target(cobs_stream::Sink::new_from_handle(
+            queue.clone(),
+            mtu,
+        )))
     }
 }

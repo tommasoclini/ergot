@@ -9,10 +9,14 @@
 use std::sync::Arc;
 
 use crate::{
-    interface_manager::{FrameProcessor, Profile, utils::std::ReceiverError},
-    logging::{error, info, trace, warn},
+    interface_manager::{
+        FrameProcessor, Profile,
+        utils::std::{ReceiverError, StdQueue},
+    },
+    logging::{debug, error, info, trace, warn},
     net_stack::NetStackHandle,
 };
+use bbqueue::prod_cons::framed::FramedConsumer;
 use maitake_sync::WaitQueue;
 use nusb::transfer::{Queue, RequestBuffer, TransferError};
 use tokio::select;
@@ -143,4 +147,237 @@ where
             }
         }
     }
+}
+
+/// A generic nusb USB bulk TxWorker.
+///
+/// Reads serialized frames from a [`FramedConsumer`] and submits them
+/// to a nusb bulk OUT queue. Handles ZLP (zero-length packet) when
+/// the frame size is a multiple of the USB max packet size.
+///
+/// On exit, calls `closer.close()` to ensure the RxWorker also
+/// shuts down.
+pub struct NusbTxWorker {
+    pub(crate) boq: Queue<Vec<u8>>,
+    pub(crate) consumer: FramedConsumer<StdQueue>,
+    pub(crate) closer: Arc<WaitQueue>,
+    pub(crate) max_usb_frame_size: Option<usize>,
+}
+
+impl NusbTxWorker {
+    pub async fn run(mut self) {
+        info!("Started nusb tx_worker");
+        loop {
+            let rxf = self.consumer.wait_read();
+            let clf = self.closer.wait();
+
+            let frame = select! {
+                r = rxf => r,
+                _c = clf => {
+                    break;
+                }
+            };
+
+            let len = frame.len();
+            debug!("sending USB pkt len:{}", len);
+
+            let needs_zlp = if let Some(mps) = &self.max_usb_frame_size {
+                (len % mps) == 0
+            } else {
+                true
+            };
+
+            self.boq.submit(frame.to_vec());
+
+            if needs_zlp {
+                self.boq.submit(vec![]);
+            }
+
+            let send_res = self.boq.next_complete().await;
+            if let Err(e) = send_res.status {
+                error!("Output Queue Error: {:?}", e);
+                break;
+            }
+
+            if needs_zlp {
+                let send_res = self.boq.next_complete().await;
+                if let Err(e) = send_res.status {
+                    error!("Output Queue Error: {:?}", e);
+                    break;
+                }
+            }
+
+            frame.release();
+        }
+        warn!("Closing nusb tx_worker");
+        self.closer.close();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registration: DirectEdge
+// ---------------------------------------------------------------------------
+
+use crate::interface_manager::Interface;
+use crate::interface_manager::InterfaceState;
+use crate::interface_manager::interface_impls::nusb_bulk::NewDevice;
+use crate::interface_manager::profiles::direct_edge::{DirectEdge, EdgeFrameProcessor};
+use bbqueue::traits::bbqhdl::BbqHandle;
+
+/// Registration error for DirectEdge.
+#[derive(Debug, PartialEq)]
+pub struct EdgeRegistrationError;
+
+/// Register a nusb USB bulk transport on a [`DirectEdge`] profile.
+///
+/// Sets the interface to `Inactive` and spawns RxWorker/TxWorker tasks.
+pub async fn register_edge<N, I>(
+    stack: N,
+    device: NewDevice,
+    queue: StdQueue,
+    state_notify: Option<Arc<WaitQueue>>,
+) -> Result<(), EdgeRegistrationError>
+where
+    I: Interface,
+    N: NetStackHandle<Profile = DirectEdge<I>> + Send + 'static,
+{
+    let closer = Arc::new(WaitQueue::new());
+    stack.stack().manage_profile(|im| {
+        match im.interface_state(()) {
+            Some(InterfaceState::Down) | None => {}
+            _ => return Err(EdgeRegistrationError),
+        }
+        im.set_closer(closer.clone());
+        im.set_interface_state((), InterfaceState::Inactive)
+            .map_err(|_| EdgeRegistrationError)?;
+        Ok(())
+    })?;
+    if let Some(notify) = &state_notify {
+        notify.wake_all();
+    }
+
+    let notify_clone = state_notify.clone();
+    let stack_clone = stack.clone();
+
+    let mut rx_worker = NusbRxWorker {
+        nsh: stack,
+        biq: device.biq,
+        closer: closer.clone(),
+        processor: EdgeFrameProcessor::new(),
+        ident: (),
+        mtu: 1024,
+        state_notify,
+    };
+
+    tokio::task::spawn(async move {
+        let close = rx_worker.closer.clone();
+        select! {
+            _run = rx_worker.run() => { close.close(); },
+            _clf = close.wait() => {},
+        }
+        stack_clone.stack().manage_profile(|im| {
+            _ = im.set_interface_state((), InterfaceState::Down);
+        });
+        if let Some(notify) = &notify_clone {
+            notify.wake_all();
+        }
+    });
+    tokio::task::spawn(
+        NusbTxWorker {
+            boq: device.boq,
+            consumer: <StdQueue as BbqHandle>::framed_consumer(&queue),
+            closer: closer.clone(),
+            max_usb_frame_size: device.max_packet_size,
+        }
+        .run(),
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Registration: DirectRouter
+// ---------------------------------------------------------------------------
+
+use crate::interface_manager::profiles::direct_router::{DirectRouter, RouterFrameProcessor};
+use crate::interface_manager::utils::framed_stream::Sink;
+use crate::interface_manager::utils::std::new_std_queue;
+
+/// Registration error for DirectRouter.
+#[derive(Debug, PartialEq)]
+pub struct RouterRegistrationError;
+
+/// Register a nusb USB bulk transport on a [`DirectRouter`] profile.
+pub async fn register_router<N, I>(
+    stack: N,
+    device: NewDevice,
+    max_ergot_packet_size: u16,
+    outgoing_buffer_size: usize,
+    state_notify: Option<Arc<WaitQueue>>,
+) -> Result<u64, RouterRegistrationError>
+where
+    I: Interface<Sink = Sink<StdQueue>>,
+    N: NetStackHandle<Profile = DirectRouter<I>> + Send + 'static,
+{
+    let q: StdQueue = new_std_queue(outgoing_buffer_size);
+    let res = stack.stack().manage_profile(|im| {
+        let ident =
+            im.register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))?;
+        let state = im.interface_state(ident)?;
+        match state {
+            InterfaceState::Active { net_id, node_id: _ } => Some((ident, net_id)),
+            _ => {
+                _ = im.deregister_interface(ident);
+                None
+            }
+        }
+    });
+    let Some((ident, net_id)) = res else {
+        return Err(RouterRegistrationError);
+    };
+    let closer = Arc::new(WaitQueue::new());
+
+    let notify_clone = state_notify.clone();
+    let nsh_clone = stack.clone();
+
+    let mut rx_worker = NusbRxWorker {
+        nsh: stack.clone(),
+        biq: device.biq,
+        closer: closer.clone(),
+        processor: RouterFrameProcessor::new(net_id),
+        ident,
+        mtu: max_ergot_packet_size,
+        state_notify,
+    };
+
+    stack.stack().manage_profile(|im| {
+        im.set_interface_closer(ident, closer.clone());
+    });
+
+    tokio::task::spawn(async move {
+        let close = rx_worker.closer.clone();
+        select! {
+            _run = rx_worker.run() => {
+                close.close();
+            },
+            _clf = close.wait() => {},
+        }
+        nsh_clone.stack().manage_profile(|im| {
+            _ = im.deregister_interface(ident);
+        });
+        if let Some(notify) = &notify_clone {
+            notify.wake_all();
+        }
+    });
+    tokio::task::spawn(
+        NusbTxWorker {
+            boq: device.boq,
+            consumer: <StdQueue as BbqHandle>::framed_consumer(&q),
+            closer: closer.clone(),
+            max_usb_frame_size: device.max_packet_size,
+        }
+        .run(),
+    );
+
+    Ok(ident)
 }

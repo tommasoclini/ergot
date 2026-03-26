@@ -20,6 +20,9 @@ pub mod tokio_cobs_stream;
 #[cfg(feature = "tokio-std")]
 pub mod tokio_udp;
 
+#[cfg(feature = "tokio-serial-v5")]
+pub mod tokio_serial;
+
 #[cfg(feature = "nusb-v0_1")]
 pub mod nusb;
 
