@@ -32,19 +32,6 @@ use crate::{
 
 use super::direct_edge::EDGE_NODE_ID;
 
-#[cfg(feature = "tokio-std")]
-pub mod tokio_stream;
-#[cfg(feature = "tokio-std")]
-pub mod tokio_tcp;
-#[cfg(feature = "tokio-std")]
-pub mod tokio_udp;
-
-#[cfg(feature = "nusb-v0_1")]
-pub mod nusb_0_1;
-
-#[cfg(feature = "tokio-serial-v5")]
-pub mod tokio_serial_5;
-
 struct Node<I: Interface> {
     edge: EdgePort<I>,
     net_id: u16,
@@ -549,6 +536,70 @@ impl<I: Interface> DirectRouter<I> {
 impl<I: Interface> Default for DirectRouter<I> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Frame processor for router profiles (`DirectRouter`, `NoStdRouter`).
+///
+/// Uses a pre-assigned `net_id` and handles Inactive→Active transition
+/// on the first successfully received frame.
+pub struct RouterFrameProcessor {
+    net_id: u16,
+    activated: bool,
+}
+
+impl RouterFrameProcessor {
+    /// Create a new processor with a pre-assigned net_id.
+    pub fn new(net_id: u16) -> Self {
+        Self {
+            net_id,
+            activated: false,
+        }
+    }
+}
+
+impl<N> crate::interface_manager::FrameProcessor<N> for RouterFrameProcessor
+where
+    N: crate::net_stack::NetStackHandle,
+{
+    fn process_frame(
+        &mut self,
+        data: &[u8],
+        nsh: &N,
+        ident: <<N as crate::net_stack::NetStackHandle>::Profile as crate::interface_manager::Profile>::InterfaceIdent,
+    ) -> bool {
+        process_frame(self.net_id, data, nsh, ident.clone());
+
+        if !self.activated {
+            // Transition Inactive → Active on first frame
+            let changed = nsh.stack().manage_profile(|im| {
+                if matches!(
+                    im.interface_state(ident.clone()),
+                    Some(InterfaceState::Inactive)
+                ) {
+                    _ = im.set_interface_state(
+                        ident,
+                        InterfaceState::Active {
+                            net_id: self.net_id,
+                            node_id: CENTRAL_NODE_ID,
+                        },
+                    );
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                self.activated = true;
+            }
+            changed
+        } else {
+            false
+        }
+    }
+
+    fn reset(&mut self) {
+        self.activated = false;
     }
 }
 

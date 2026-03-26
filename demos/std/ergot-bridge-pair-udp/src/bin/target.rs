@@ -1,12 +1,11 @@
 use ergot::{
-    toolkits::tokio_udp::{EdgeStack, new_std_queue, new_target_stack, register_edge_interface},
+    toolkits::tokio_udp::{EdgeStack, new_std_queue, new_target_stack, register_edge_target_interface},
     topic,
     well_known::DeviceInfo,
 };
 use log::{debug, info};
 use tokio::{net::UdpSocket, select, time, time::sleep};
 
-use ergot::interface_manager::profiles::direct_edge::tokio_udp::InterfaceKind;
 use ergot::logging::log_v0_4::LogSink;
 use std::convert::TryInto;
 use std::{io, pin::pin, time::Duration};
@@ -35,7 +34,7 @@ async fn main() -> io::Result<()> {
     tokio::task::spawn(yeeter(stack.clone()));
     tokio::task::spawn(yeet_listener(stack.clone(), 0));
 
-    register_edge_interface(&stack, udp_socket, &queue, InterfaceKind::Target, None, None)
+    register_edge_target_interface(&stack, udp_socket, &queue, None, None)
         .await
         .unwrap();
 

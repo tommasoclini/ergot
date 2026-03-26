@@ -22,7 +22,8 @@ use ergot::{
     endpoint,
     exports::bbqueue::traits::coordination::cas::AtomicCoord,
     logging::defmt_sink::{self, DefmtConsumer},
-    toolkits::embedded_io_async_v0_7::{self, Queue, RxWorker, Stack, tx_worker},
+    interface_manager::{InterfaceState, profiles::direct_edge::EdgeFrameProcessor, transports::eio::RxWorker},
+    toolkits::embedded_io_async_v0_7::{self, Queue, Stack, tx_worker},
     transport::rtt::{RttReader, RttWriter},
     well_known::ErgotPingEndpoint,
 };
@@ -103,10 +104,10 @@ async fn rx_task(
     rtt_down: &'static mut rtt_target::DownChannel,
 ) {
     let reader = RttReader::new(rtt_down);
-    let mut worker = RxWorker::new_target(stack, reader, ());
+    let mut worker = RxWorker::new(stack, reader, EdgeFrameProcessor::new(), ());
     let mut frame_buf = [0u8; (ERGOT_MTU as usize) + 64];
     let mut scratch_buf = [0u8; 256];
-    let _ = worker.run(&mut frame_buf, &mut scratch_buf).await;
+    let _ = worker.run(InterfaceState::Inactive, &mut frame_buf, &mut scratch_buf).await;
 }
 
 #[embassy_executor::task]

@@ -42,7 +42,40 @@ pub(crate) mod edge_port;
 pub mod interface_impls;
 pub mod multi;
 pub mod profiles;
+pub mod transports;
 pub mod utils;
+
+/// Profile-specific frame processing logic.
+///
+/// Implemented by each profile ([`DirectEdge`], [`NoStdRouter`], etc.) to
+/// handle decoded frames from any transport (USB, embedded-io, TCP, etc.).
+/// Transport RxWorkers are generic over this trait, so each transport is
+/// written once and works with every profile.
+///
+/// [`DirectEdge`]: profiles::direct_edge::DirectEdge
+/// [`NoStdRouter`]: profiles::no_std_router::NoStdRouter
+pub trait FrameProcessor<N: crate::net_stack::NetStackHandle> {
+    /// Process a raw decoded frame.
+    ///
+    /// `ident` is the interface identifier, provided by the transport
+    /// RxWorker. Returns `true` if the interface state changed (e.g.,
+    /// `Inactive` → `Active`), signaling the RxWorker to notify state
+    /// observers.
+    fn process_frame(
+        &mut self,
+        data: &[u8],
+        nsh: &N,
+        ident: <<N as crate::net_stack::NetStackHandle>::Profile as Profile>::InterfaceIdent,
+    ) -> bool;
+
+    /// Reset internal state after a timeout or suspend event.
+    ///
+    /// Called when liveness timeout or USB suspend causes the interface
+    /// to transition to `Inactive`. The processor should clear any
+    /// discovered state (e.g., net_id) so that the next frame triggers
+    /// re-discovery.
+    fn reset(&mut self);
+}
 
 pub trait ConstInit {
     const INIT: Self;

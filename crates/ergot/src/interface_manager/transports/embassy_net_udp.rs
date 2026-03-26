@@ -1,7 +1,12 @@
-use crate::interface_manager::profiles::direct_edge::{
-    CENTRAL_NODE_ID, EDGE_NODE_ID, process_frame,
-};
-use crate::interface_manager::{InterfaceState, Profile};
+//! Generic embassy-net UDP combined RX/TX worker.
+//!
+//! Works with any [`FrameProcessor`]. UDP datagrams are treated as
+//! complete frames (no COBS encoding). RX and TX share a single
+//! async task and embassy-net UDP socket.
+//!
+//! [`FrameProcessor`]: crate::interface_manager::FrameProcessor
+
+use crate::interface_manager::{FrameProcessor, InterfaceState, Profile};
 use crate::logging::{error, trace};
 use crate::net_stack::NetStackHandle;
 use crate::wire_frames::MAX_HDR_ENCODED_SIZE;
@@ -16,6 +21,7 @@ use embassy_net_0_7::udp::{RecvError, SendError, UdpMetadata, UdpSocket};
 pub const UDP_OVER_ETH_ERGOT_FRAME_SIZE_MAX: usize = 1500 - 8 - 20;
 pub const UDP_OVER_ETH_ERGOT_PAYLOAD_SIZE_MAX: usize =
     UDP_OVER_ETH_ERGOT_FRAME_SIZE_MAX - MAX_HDR_ENCODED_SIZE;
+
 #[derive(Debug, PartialEq)]
 pub struct SocketAlreadyActive;
 
@@ -25,28 +31,36 @@ pub enum RxTxError {
     RxError(RecvError),
 }
 
-pub struct RxTxWorker<const NN: usize, N, C>
+/// A generic embassy-net UDP combined RX/TX worker.
+///
+/// The caller sets up the initial interface state before calling
+/// [`run`](Self::run). On exit (or drop), the interface transitions
+/// to [`InterfaceState::Down`].
+pub struct RxTxWorker<const NN: usize, N, C, P>
 where
     N: NetStackHandle,
     C: Coord + 'static,
+    P: FrameProcessor<N>,
 {
     nsh: N,
     socket: UdpSocket<'static>,
-    net_id: Option<u16>,
+    processor: P,
     ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
-    is_controller: bool,
     consumer: FramedConsumer<&'static BBQueue<Inline<NN>, C, MaiNotSpsc>>,
     remote_endpoint: UdpMetadata,
 }
 
-impl<const NN: usize, N, C> RxTxWorker<NN, N, C>
+impl<const NN: usize, N, C, P> RxTxWorker<NN, N, C, P>
 where
     N: NetStackHandle,
     C: Coord,
+    P: FrameProcessor<N>,
 {
-    pub fn new_target<EP>(
-        net: N,
+    /// Create a new combined RX/TX worker.
+    pub fn new<EP>(
+        nsh: N,
         socket: UdpSocket<'static>,
+        processor: P,
         ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
         consumer: FramedConsumer<&'static BBQueue<Inline<NN>, C, MaiNotSpsc>>,
         remote_endpoint: EP,
@@ -55,66 +69,31 @@ where
         EP: Into<UdpMetadata>,
     {
         Self {
-            nsh: net,
+            nsh,
             socket,
-            net_id: None,
+            processor,
             ident,
-            is_controller: false,
             consumer,
             remote_endpoint: remote_endpoint.into(),
         }
     }
 
-    pub fn new_controller<EP>(
-        net: N,
-        socket: UdpSocket<'static>,
-        ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
-        consumer: FramedConsumer<&'static BBQueue<Inline<NN>, C, MaiNotSpsc>>,
-        remote_endpoint: EP,
-    ) -> Self
-    where
-        EP: Into<UdpMetadata>,
-    {
-        Self {
-            nsh: net,
-            socket,
-            net_id: None,
-            ident,
-            is_controller: true,
-            consumer,
-            remote_endpoint: remote_endpoint.into(),
-        }
-    }
-
-    pub async fn run(&mut self, scratch: &mut [u8]) -> Result<(), RxTxError> {
-        // Mark the interface as established
+    /// Run the combined RX/TX loop with a given initial state.
+    ///
+    /// Sets `initial_state` before entering the loop. On exit (or drop),
+    /// the interface transitions to [`InterfaceState::Down`].
+    pub async fn run(
+        &mut self,
+        initial_state: InterfaceState,
+        scratch: &mut [u8],
+    ) -> Result<(), RxTxError> {
         _ = self
             .nsh
             .stack()
-            .manage_profile(|im| {
-                if self.is_controller {
-                    trace!("UDP controller is active");
-                    self.net_id = Some(1);
-                    im.set_interface_state(
-                        self.ident.clone(),
-                        InterfaceState::Active {
-                            net_id: 1,
-                            node_id: CENTRAL_NODE_ID,
-                        },
-                    )
-                } else {
-                    trace!("UDP target is active");
-                    self.net_id = Some(1);
-                    im.set_interface_state(
-                        self.ident.clone(),
-                        InterfaceState::Active {
-                            net_id: 1,
-                            node_id: EDGE_NODE_ID,
-                        },
-                    )
-                }
-            })
-            .inspect_err(|err| error!("Error setting interface state: {:?}", err));
+            .manage_profile(|im| im.set_interface_state(self.ident.clone(), initial_state))
+            .inspect_err(|err| {
+                error!("Error setting interface state: {:?}", err);
+            });
 
         let res = self.run_inner(scratch).await;
         _ = self
@@ -124,13 +103,12 @@ where
         res
     }
 
-    pub async fn run_inner(&mut self, scratch: &mut [u8]) -> Result<(), RxTxError> {
+    async fn run_inner(&mut self, scratch: &mut [u8]) -> Result<(), RxTxError> {
         let Self {
             nsh,
             socket,
-            net_id,
+            processor,
             ident,
-            is_controller: _,
             consumer: rx,
             remote_endpoint,
         } = self;
@@ -142,7 +120,6 @@ where
             match select(a, b).await {
                 Either::First(recv_result) => {
                     trace!("Socket future");
-                    // TODO compare the metadata.endpoint to self.remote_endpoint and possibly reject
                     let (used, metadata) = recv_result.map_err(RxTxError::RxError)?;
                     trace!(
                         "Received data from socket. used: {}, metadata: {:?}",
@@ -150,8 +127,7 @@ where
                     );
 
                     let data = &scratch[..used];
-
-                    process_frame(net_id, data, nsh, ident.clone());
+                    processor.process_frame(data, nsh, ident.clone());
                 }
                 Either::Second(data) => {
                     trace!("Tx queue future");
@@ -167,13 +143,13 @@ where
     }
 }
 
-impl<const NN: usize, N, C> Drop for RxTxWorker<NN, N, C>
+impl<const NN: usize, N, C, P> Drop for RxTxWorker<NN, N, C, P>
 where
     N: NetStackHandle,
     C: Coord,
+    P: FrameProcessor<N>,
 {
     fn drop(&mut self) {
-        // No receiver? Drop the interface.
         self.nsh.stack().manage_profile(|im| {
             _ = im.set_interface_state(self.ident.clone(), InterfaceState::Down);
         })

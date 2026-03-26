@@ -1,39 +1,40 @@
-//! A point to point "Edge" profile using USB bulk packets
+//! USB bulk endpoint RxWorker (embassy-usb v0.6).
 //!
-//! This is useful for devices that are directly connected to a PC via USB with
-//! no additional interfaces.
+//! Generic over any [`FrameProcessor`], so it works with [`DirectEdge`],
+//! [`NoStdRouter`], or any future profile.
+//!
+//! [`FrameProcessor`]: crate::interface_manager::FrameProcessor
+//! [`DirectEdge`]: crate::interface_manager::profiles::direct_edge::DirectEdge
+//! [`NoStdRouter`]: crate::interface_manager::profiles::no_std_router::NoStdRouter
 
 use crate::logging::info;
 use crate::{
     interface_manager::{
-        InterfaceState, LivenessConfig, Profile,
-        interface_impls::embassy_usb::{EmbassyInterface, USB_SUSPEND},
-        profiles::direct_edge::{DirectEdge, process_frame},
+        FrameProcessor, InterfaceState, LivenessConfig, Profile,
+        interface_impls::embassy_usb::USB_SUSPEND,
     },
     net_stack::NetStackHandle,
 };
-use bbqueue::traits::bbqhdl::BbqHandle;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Instant, Timer};
-use embassy_usb_0_5::driver::{Driver, Endpoint, EndpointError, EndpointOut};
+use embassy_usb_0_6::driver::{Driver, Endpoint, EndpointError, EndpointOut};
 use maitake_sync::WaitQueue;
 
-pub type EmbassyUsbManager<Q> = DirectEdge<EmbassyInterface<Q>>;
-
-/// The Receive Worker
+/// A generic USB bulk endpoint RxWorker.
 ///
-/// This manages the receiver operations, as well as manages the connection state.
-///
-/// The `N` const generic buffer is the size of the outgoing buffer.
-pub struct RxWorker<Q, N, D>
+/// Reads USB bulk frames, detects USB suspend/resume via
+/// `USB_SUSPEND` watch, and feeds decoded frames to a
+/// [`FrameProcessor`].
+pub struct RxWorker<N, D, P>
 where
-    N: NetStackHandle<Profile = EmbassyUsbManager<Q>>,
-    Q: BbqHandle + 'static,
+    N: NetStackHandle,
     D: Driver<'static>,
+    P: FrameProcessor<N>,
 {
     nsh: N,
     rx: D::EndpointOut,
-    net_id: Option<u16>,
+    processor: P,
+    ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
     liveness: Option<LivenessConfig>,
     state_notify: Option<&'static WaitQueue>,
 }
@@ -44,20 +45,27 @@ enum ReceiverError {
     ConnectionClosed,
 }
 
-// ---- impls ----
-
-impl<Q, N, D> RxWorker<Q, N, D>
+impl<N, D, P> RxWorker<N, D, P>
 where
-    N: NetStackHandle<Profile = EmbassyUsbManager<Q>>,
-    Q: BbqHandle + 'static,
+    N: NetStackHandle,
     D: Driver<'static>,
+    P: FrameProcessor<N>,
 {
-    /// Create a new receiver object
-    pub fn new(stack: N, rx: D::EndpointOut) -> Self {
+    /// Create a new receiver object.
+    ///
+    /// `processor` handles decoded frames (profile-specific logic).
+    /// `ident` is the interface identifier used for state management.
+    pub fn new(
+        nsh: N,
+        rx: D::EndpointOut,
+        processor: P,
+        ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
+    ) -> Self {
         Self {
-            nsh: stack,
+            nsh,
             rx,
-            net_id: None,
+            processor,
+            ident,
             liveness: None,
             state_notify: None,
         }
@@ -69,7 +77,7 @@ where
     /// [`InterfaceState::Inactive`] if no frames are received within
     /// `config.timeout_ms`. The timer only starts after the first frame
     /// is received. Recovery is automatic — when frames resume,
-    /// [`process_frame`] transitions back to [`InterfaceState::Active`].
+    /// the processor transitions back to [`InterfaceState::Active`].
     pub fn with_liveness(mut self, config: LivenessConfig) -> Self {
         self.liveness = Some(config);
         self
@@ -91,7 +99,7 @@ where
     /// Runs forever, processing incoming frames.
     ///
     /// The provided slice is used for receiving a frame via USB. It is used as the MTU
-    /// for the entire connections.
+    /// for the entire connection.
     ///
     /// `max_usb_frame_size` is the largest size of USB frame we can receive. For example,
     /// it would be 64. This is NOT the largest message we can receive. It MUST be a power
@@ -110,10 +118,9 @@ where
             info!("Connection established");
 
             // Mark the interface as established
-            _ = self
-                .nsh
-                .stack()
-                .manage_profile(|im| im.set_interface_state((), InterfaceState::Inactive));
+            _ = self.nsh.stack().manage_profile(|im| {
+                im.set_interface_state(self.ident.clone(), InterfaceState::Inactive)
+            });
             self.notify();
 
             // Handle all frames for the connection
@@ -123,7 +130,7 @@ where
             // Mark the connection as lost
             info!("Connection lost");
             self.nsh.stack().manage_profile(|im| {
-                _ = im.set_interface_state((), InterfaceState::Down);
+                _ = im.set_interface_state(self.ident.clone(), InterfaceState::Down);
             });
             self.notify();
         }
@@ -173,12 +180,12 @@ where
             {
                 // Frame received
                 Either3::First(Ok(f)) => {
-                    let prev_net_id = self.net_id;
                     have_received = true;
                     last_data_at = Some(Instant::now());
-                    process_frame(&mut self.net_id, f, &self.nsh, ());
-                    // Notify on state transition (net_id changed means Active)
-                    if self.net_id != prev_net_id {
+                    let changed = self
+                        .processor
+                        .process_frame(f, &self.nsh, self.ident.clone());
+                    if changed {
                         self.notify();
                     }
                 }
@@ -190,12 +197,17 @@ where
                     if suspended {
                         info!("USB suspended, marking interface inactive");
                         self.nsh.stack().manage_profile(|im| {
-                            if matches!(im.interface_state(()), Some(InterfaceState::Active { .. }))
-                            {
-                                _ = im.set_interface_state((), InterfaceState::Inactive);
+                            if matches!(
+                                im.interface_state(self.ident.clone()),
+                                Some(InterfaceState::Active { .. })
+                            ) {
+                                _ = im.set_interface_state(
+                                    self.ident.clone(),
+                                    InterfaceState::Inactive,
+                                );
                             }
                         });
-                        self.net_id = None;
+                        self.processor.reset();
                         have_received = false;
                         last_data_at = None;
                         self.notify();
@@ -208,11 +220,15 @@ where
                 Either3::Third(()) => {
                     info!("USB liveness timeout, marking interface inactive");
                     self.nsh.stack().manage_profile(|im| {
-                        if matches!(im.interface_state(()), Some(InterfaceState::Active { .. })) {
-                            _ = im.set_interface_state((), InterfaceState::Inactive);
+                        if matches!(
+                            im.interface_state(self.ident.clone()),
+                            Some(InterfaceState::Active { .. })
+                        ) {
+                            _ = im
+                                .set_interface_state(self.ident.clone(), InterfaceState::Inactive);
                         }
                     });
-                    self.net_id = None;
+                    self.processor.reset();
                     have_received = false;
                     last_data_at = None;
                     self.notify();
@@ -221,7 +237,7 @@ where
         }
     }
 
-    /// Receive a single ergot frame, which might be across multiple reads of the endpoint
+    /// Receive a single ergot frame, which might be across multiple reads of the endpoint.
     ///
     /// No checking of the frame is done, only that the bulk endpoint gave us a frame.
     async fn one_frame<'a>(
@@ -244,17 +260,14 @@ where
             let (_now, later) = window.split_at_mut(n);
             window = later;
             if n != max_frame_len {
-                // We now have a full frame! Great!
+                // We now have a full frame
                 let wlen = window.len();
                 let len = buflen - wlen;
-                let frame = &mut frame[..len];
-
-                return Ok(frame);
+                return Ok(&mut frame[..len]);
             }
         }
 
-        // If we got here, we've run out of space. That's disappointing. Accumulate to the
-        // end of this packet
+        // If we got here, we've run out of space. Accumulate to the end of this packet.
         loop {
             match self.rx.read(frame).await {
                 Ok(n) if n == max_frame_len => {}
@@ -268,15 +281,15 @@ where
     }
 }
 
-impl<Q, N, D> Drop for RxWorker<Q, N, D>
+impl<N, D, P> Drop for RxWorker<N, D, P>
 where
-    N: NetStackHandle<Profile = EmbassyUsbManager<Q>>,
-    Q: BbqHandle + 'static,
+    N: NetStackHandle,
     D: Driver<'static>,
+    P: FrameProcessor<N>,
 {
     fn drop(&mut self) {
         self.nsh.stack().manage_profile(|im| {
-            _ = im.set_interface_state((), InterfaceState::Down);
+            _ = im.set_interface_state(self.ident.clone(), InterfaceState::Down);
         });
         self.notify();
     }

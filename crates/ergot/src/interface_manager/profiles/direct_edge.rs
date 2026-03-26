@@ -14,26 +14,15 @@ use crate::logging::{debug, warn};
 
 use serde::Serialize;
 
+/// Type alias for a [`DirectEdge`] profile using the embedded-io interface.
 #[cfg(any(feature = "embedded-io-async-v0_6", feature = "embedded-io-async-v0_7"))]
-pub mod eio;
+pub type EmbeddedIoManager<Q> =
+    DirectEdge<crate::interface_manager::interface_impls::embedded_io::IoInterface<Q>>;
 
-#[cfg(feature = "embassy-usb-v0_5")]
-pub mod eusb_0_5;
-
-#[cfg(feature = "embassy-usb-v0_6")]
-pub mod eusb_0_6;
-
-#[cfg(feature = "tokio-std")]
-pub mod tokio_tcp;
-
-#[cfg(feature = "tokio-std")]
-pub mod tokio_udp;
-
-#[cfg(feature = "tokio-std")]
-pub mod tokio_stream;
-
-#[cfg(feature = "embassy-net-v0_7")]
-pub mod embassy_net_udp_0_7;
+/// Type alias for a [`DirectEdge`] profile using the embassy-usb interface.
+#[cfg(any(feature = "embassy-usb-v0_5", feature = "embassy-usb-v0_6"))]
+pub type EmbassyUsbManager<Q> =
+    DirectEdge<crate::interface_manager::interface_impls::embassy_usb::EmbassyInterface<Q>>;
 
 use crate::{
     Header, HeaderSeq, ProtocolError,
@@ -145,6 +134,55 @@ impl<I: Interface> Profile for DirectEdge<I> {
         state: InterfaceState,
     ) -> Result<(), SetStateError> {
         self.port.set_state(state)
+    }
+}
+
+/// Frame processor for `DirectEdge` profile.
+///
+/// Discovers `net_id` from the first incoming frame and transitions the
+/// interface to [`InterfaceState::Active`]. Subsequent frames reuse the
+/// discovered net_id unless it changes (e.g., after reassignment).
+pub struct EdgeFrameProcessor {
+    net_id: Option<u16>,
+}
+
+impl EdgeFrameProcessor {
+    /// Create a new processor with no discovered net_id (target mode).
+    pub fn new() -> Self {
+        Self { net_id: None }
+    }
+
+    /// Create a new processor with a pre-set net_id (controller mode).
+    pub fn new_controller(net_id: u16) -> Self {
+        Self {
+            net_id: Some(net_id),
+        }
+    }
+}
+
+impl Default for EdgeFrameProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<N> crate::interface_manager::FrameProcessor<N> for EdgeFrameProcessor
+where
+    N: crate::net_stack::NetStackHandle,
+{
+    fn process_frame(
+        &mut self,
+        data: &[u8],
+        nsh: &N,
+        ident: <<N as crate::net_stack::NetStackHandle>::Profile as crate::interface_manager::Profile>::InterfaceIdent,
+    ) -> bool {
+        let prev = self.net_id;
+        process_frame(&mut self.net_id, data, nsh, ident);
+        self.net_id != prev
+    }
+
+    fn reset(&mut self) {
+        self.net_id = None;
     }
 }
 

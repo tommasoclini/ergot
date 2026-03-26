@@ -134,4 +134,11 @@
 //! * An "RX" worker task, that decodes incoming frames, and feeds them to the Netstack
 //! * A "TX" worker task, that is responsible for draining the "sink", and encoding frames and sending them out of the interface.
 //!
+//! Transport workers (RX and TX) are fully generic over profiles via the
+//! [`FrameProcessor`](crate::interface_manager::FrameProcessor) trait. Each
+//! transport is implemented once in the
+//! [`transports`](crate::interface_manager::transports) module, and works with
+//! any profile. Adding a new transport requires no changes to existing profiles,
+//! and adding a new profile automatically works with all existing transports.
+//!
 //! One or both of these worker tasks will also typically be responsible for tracking the "link state" of the interface, for example reporting to the Profile if a USB cable is disconnected, so frames will no longer be routable to that interface.
