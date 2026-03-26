@@ -22,7 +22,7 @@ use maitake_sync::WaitQueue;
 
 /// A generic embedded-io COBS stream RxWorker.
 ///
-/// Reads bytes from an [`embedded_io_async::Read`] source, decodes COBS
+/// Reads bytes from an `embedded_io_async::Read` source, decodes COBS
 /// frames, and feeds them to a [`FrameProcessor`].
 ///
 /// Supports optional liveness timeout and state change notifications
@@ -163,6 +163,7 @@ where
                     }
                     FeedResult::Success { data, remaining }
                     | FeedResult::SuccessInput { data, remaining } => {
+                        #[allow(unused_variables)]
                         let changed =
                             self.processor
                                 .process_frame(data, &self.nsh, self.ident.clone());

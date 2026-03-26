@@ -3,8 +3,6 @@
 #![cfg(feature = "tokio-std")]
 #![cfg(not(miri))]
 
-use std::sync::Arc;
-
 use ergot::{
     Address, FrameKind, HeaderSeq,
     interface_manager::{
