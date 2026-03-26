@@ -6,14 +6,17 @@
 use crate::logging::info;
 use crate::{
     interface_manager::{
-        InterfaceState, Profile,
-        interface_impls::embassy_usb::EmbassyInterface,
+        InterfaceState, LivenessConfig, Profile,
+        interface_impls::embassy_usb::{EmbassyInterface, USB_SUSPEND},
         profiles::direct_edge::{DirectEdge, process_frame},
     },
     net_stack::NetStackHandle,
 };
 use bbqueue::traits::bbqhdl::BbqHandle;
+use embassy_futures::select::{Either3, select3};
+use embassy_time::{Instant, Timer};
 use embassy_usb_0_6::driver::{Driver, Endpoint, EndpointError, EndpointOut};
+use maitake_sync::WaitQueue;
 
 pub type EmbassyUsbManager<Q> = DirectEdge<EmbassyInterface<Q>>;
 
@@ -31,6 +34,8 @@ where
     nsh: N,
     rx: D::EndpointOut,
     net_id: Option<u16>,
+    liveness: Option<LivenessConfig>,
+    state_notify: Option<&'static WaitQueue>,
 }
 
 /// Errors observable by the receiver
@@ -53,6 +58,33 @@ where
             nsh: stack,
             rx,
             net_id: None,
+            liveness: None,
+            state_notify: None,
+        }
+    }
+
+    /// Enable liveness tracking with the given timeout.
+    ///
+    /// When enabled, the RxWorker transitions the interface to
+    /// [`InterfaceState::Inactive`] if no frames are received within
+    /// `config.timeout_ms`. The timer only starts after the first frame
+    /// is received. Recovery is automatic — when frames resume,
+    /// [`process_frame`] transitions back to [`InterfaceState::Active`].
+    pub fn with_liveness(mut self, config: LivenessConfig) -> Self {
+        self.liveness = Some(config);
+        self
+    }
+
+    /// Set a [`WaitQueue`] to be notified on interface state transitions.
+    pub fn with_state_notify(mut self, notify: &'static WaitQueue) -> Self {
+        self.state_notify = Some(notify);
+        self
+    }
+
+    /// Notify the state observer, if configured.
+    fn notify(&self) {
+        if let Some(notify) = self.state_notify {
+            notify.wake_all();
         }
     }
 
@@ -66,8 +98,15 @@ where
     /// of two.
     pub async fn run(mut self, frame: &mut [u8], max_usb_frame_size: usize) -> ! {
         assert!(max_usb_frame_size.is_power_of_two());
+        let mut suspend_rx = USB_SUSPEND
+            .receiver()
+            .expect("USB_SUSPEND watch receiver slot exhausted");
         loop {
             self.rx.wait_enabled().await;
+
+            // Clear any stale suspend state from a previous connection
+            USB_SUSPEND.sender().send(false);
+
             info!("Connection established");
 
             // Mark the interface as established
@@ -75,35 +114,108 @@ where
                 .nsh
                 .stack()
                 .manage_profile(|im| im.set_interface_state((), InterfaceState::Inactive));
+            self.notify();
 
             // Handle all frames for the connection
-            self.one_conn(frame, max_usb_frame_size).await;
+            self.one_conn(frame, max_usb_frame_size, &mut suspend_rx)
+                .await;
 
             // Mark the connection as lost
             info!("Connection lost");
             self.nsh.stack().manage_profile(|im| {
                 _ = im.set_interface_state((), InterfaceState::Down);
             });
+            self.notify();
         }
     }
 
-    /// Handle all frames, returning when a connection error occurs
-    async fn one_conn(&mut self, frame: &mut [u8], max_usb_frame_size: usize) {
+    /// Handle all frames, returning when a connection error occurs.
+    ///
+    /// Uses [`USB_SUSPEND`] watch for instant USB suspend/resume detection
+    /// and an optional liveness timer for no-data timeout.
+    async fn one_conn(
+        &mut self,
+        frame: &mut [u8],
+        max_usb_frame_size: usize,
+        suspend_rx: &mut embassy_sync::watch::Receiver<
+            'static,
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            bool,
+            2,
+        >,
+    ) {
+        let mut have_received = false;
+        let mut last_data_at: Option<Instant> = None;
+
         loop {
-            match self.one_frame(frame, max_usb_frame_size).await {
-                Ok(f) => {
-                    // NOTE: this is BLOCKING, but does NOT wait for the request to
-                    // be processed, we just copy the frame into its destination
-                    // buffers.
-                    //
-                    // We COULD potentially gain some throughput by having another
-                    // buffer here, so we can immediately begin receiving the next
-                    // frame, at the cost of extra buffer space and copies.
+            // Compute liveness remaining time (only active after first frame)
+            let liveness_remaining = if have_received {
+                self.liveness.as_ref().map(|lc| {
+                    lc.timeout_ms
+                        .saturating_sub(last_data_at.map_or(0, |t| t.elapsed().as_millis()))
+                })
+            } else {
+                None
+            };
+
+            match select3(
+                self.one_frame(frame, max_usb_frame_size),
+                suspend_rx.changed(),
+                async {
+                    if let Some(ms) = liveness_remaining {
+                        Timer::after_millis(ms).await;
+                    } else {
+                        core::future::pending::<()>().await;
+                    }
+                },
+            )
+            .await
+            {
+                // Frame received
+                Either3::First(Ok(f)) => {
+                    let prev_net_id = self.net_id;
+                    have_received = true;
+                    last_data_at = Some(Instant::now());
                     process_frame(&mut self.net_id, f, &self.nsh, ());
+                    // Notify on state transition (net_id changed means Active)
+                    if self.net_id != prev_net_id {
+                        self.notify();
+                    }
                 }
-                Err(ReceiverError::ConnectionClosed) => break,
-                Err(_e) => {
-                    continue;
+                Either3::First(Err(ReceiverError::ConnectionClosed)) => break,
+                Either3::First(Err(_e)) => continue,
+
+                // USB suspend/resume — instant wakeup from Handler
+                Either3::Second(suspended) => {
+                    if suspended {
+                        info!("USB suspended, marking interface inactive");
+                        self.nsh.stack().manage_profile(|im| {
+                            if matches!(im.interface_state(()), Some(InterfaceState::Active { .. }))
+                            {
+                                _ = im.set_interface_state((), InterfaceState::Inactive);
+                            }
+                        });
+                        self.net_id = None;
+                        have_received = false;
+                        last_data_at = None;
+                        self.notify();
+                    }
+                    // If not suspended (resume event), just continue —
+                    // recovery happens automatically via process_frame
+                }
+
+                // Liveness timeout — no data for configured duration
+                Either3::Third(()) => {
+                    info!("USB liveness timeout, marking interface inactive");
+                    self.nsh.stack().manage_profile(|im| {
+                        if matches!(im.interface_state(()), Some(InterfaceState::Active { .. })) {
+                            _ = im.set_interface_state((), InterfaceState::Inactive);
+                        }
+                    });
+                    self.net_id = None;
+                    have_received = false;
+                    last_data_at = None;
+                    self.notify();
                 }
             }
         }
@@ -163,9 +275,9 @@ where
     D: Driver<'static>,
 {
     fn drop(&mut self) {
-        // No receiver? Drop the interface.
         self.nsh.stack().manage_profile(|im| {
             _ = im.set_interface_state((), InterfaceState::Down);
-        })
+        });
+        self.notify();
     }
 }

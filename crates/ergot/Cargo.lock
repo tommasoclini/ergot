@@ -587,6 +587,7 @@ dependencies = [
  "defmt 1.0.1",
  "embassy-futures",
  "embassy-net",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embassy-usb 0.5.1",
  "embassy-usb 0.6.0",
