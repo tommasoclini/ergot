@@ -81,6 +81,7 @@ impl<I: Interface> EdgePort<I> {
 
     /// Returns the net_id if the interface is [`InterfaceState::Active`],
     /// or `None` otherwise.
+    #[allow(dead_code)]
     pub fn net_id(&self) -> Option<u16> {
         match self.state {
             InterfaceState::Active { net_id, .. } => Some(net_id),
@@ -193,6 +194,7 @@ impl<I: Interface> EdgePort<I> {
     /// [`HeaderSeq`] because raw messages have already been assigned a
     /// sequence number by the originator; however, `common_send` may
     /// reassign one.
+    #[allow(dead_code)]
     pub fn send_raw(&mut self, hdr: &HeaderSeq, data: &[u8]) -> Result<(), InterfaceSendError> {
         let nshdr: Header = hdr.clone().into();
         let (sink, header) = self.common_send(&nshdr)?;
