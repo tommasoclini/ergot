@@ -23,7 +23,9 @@ use embassy_stm32::{Config, bind_interrupts, eth, peripherals, rcc, rng};
 use embassy_time::{Duration, Ticker, Timer, WithTimeout};
 use embedded_alloc::LlffHeap as Heap;
 use ergot::exports::bbqueue::traits::coordination::cas::AtomicCoord;
-use ergot::interface_manager::profiles::direct_edge::embassy_net_udp_0_7::{RxTxWorker, UDP_OVER_ETH_ERGOT_FRAME_SIZE_MAX, UDP_OVER_ETH_ERGOT_PAYLOAD_SIZE_MAX};
+use ergot::interface_manager::profiles::direct_edge::{EDGE_NODE_ID, EdgeFrameProcessor};
+use ergot::interface_manager::transports::embassy_net_udp::{RxTxWorker, UDP_OVER_ETH_ERGOT_FRAME_SIZE_MAX, UDP_OVER_ETH_ERGOT_PAYLOAD_SIZE_MAX};
+use ergot::interface_manager::InterfaceState;
 use ergot::logging::log_v0_4::LogSink;
 use ergot::toolkits::embassy_net_v0_7 as kit;
 use ergot::well_known::ErgotPingEndpoint;
@@ -267,10 +269,10 @@ async fn run_socket(
     endpoint: IpEndpoint,
 ) {
     let consumer = OUTQ.framed_consumer();
-    let mut rxtx = RxTxWorker::new_target(&STACK, socket, (), consumer, endpoint);
+    let mut rxtx = RxTxWorker::new(&STACK, socket, EdgeFrameProcessor::new(), (), consumer, endpoint);
 
     loop {
-        _ = rxtx.run(scratch_buf).await;
+        _ = rxtx.run(InterfaceState::Active { net_id: 1, node_id: EDGE_NODE_ID }, scratch_buf).await;
     }
 }
 

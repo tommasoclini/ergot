@@ -26,7 +26,7 @@ const MAX_PACKET_SIZE: usize = 1024;
 // Our esp32c6-specific IO driver
 type AppDriver = UsbSerialJtagRx<'static, Async>;
 // The type of our RX Worker
-type RxWorker = kit::RxWorker<&'static Queue, CriticalSectionRawMutex, AppDriver>;
+type RxWorker = ergot::interface_manager::transports::eio::RxWorker<&'static Stack, AppDriver, ergot::interface_manager::profiles::direct_edge::EdgeFrameProcessor>;
 // The type of our netstack
 type Stack = kit::Stack<&'static Queue, CriticalSectionRawMutex>;
 // The type of our outgoing queue
@@ -52,7 +52,7 @@ async fn main(spawner: Spawner) {
 
     // Create our USB-Serial interface, which implements the embedded-io-async traits
     let (rx, tx) = UsbSerialJtag::new(p.USB_DEVICE).into_async().split();
-    let rx = RxWorker::new_target(&STACK, rx, ());
+    let rx = RxWorker::new(&STACK, rx, ergot::interface_manager::profiles::direct_edge::EdgeFrameProcessor::new(), ());
 
     // Spawn I/O worker tasks
     spawner.must_spawn(run_rx(rx, RECV_BUF.take(), SCRATCH_BUF.take()));
@@ -67,7 +67,7 @@ async fn main(spawner: Spawner) {
 #[embassy_executor::task]
 async fn run_rx(mut rcvr: RxWorker, recv_buf: &'static mut [u8], scratch_buf: &'static mut [u8]) {
     loop {
-        _ = rcvr.run(recv_buf, scratch_buf).await;
+        _ = rcvr.run(ergot::interface_manager::InterfaceState::Inactive, recv_buf, scratch_buf).await;
     }
 }
 
