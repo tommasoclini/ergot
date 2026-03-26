@@ -13,9 +13,6 @@ use embassy_time::{Duration, Instant};
 use rand_core::RngCore;
 use serde::Serialize;
 
-#[cfg(any(feature = "embedded-io-async-v0_6", feature = "embedded-io-async-v0_7"))]
-pub mod eio;
-
 use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{
@@ -495,6 +492,40 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
                 })
             }
         }
+    }
+}
+
+/// Frame processor for `NoStdRouter` profile.
+///
+/// Uses a pre-assigned `net_id` (from [`NoStdRouter::register_interface`])
+/// and does not perform net_id discovery.
+pub struct RouterFrameProcessor {
+    net_id: u16,
+}
+
+impl RouterFrameProcessor {
+    /// Create a new processor with a pre-assigned net_id.
+    pub fn new(net_id: u16) -> Self {
+        Self { net_id }
+    }
+}
+
+impl<N> crate::interface_manager::FrameProcessor<N> for RouterFrameProcessor
+where
+    N: crate::net_stack::NetStackHandle,
+{
+    fn process_frame(
+        &mut self,
+        data: &[u8],
+        nsh: &N,
+        ident: <<N as crate::net_stack::NetStackHandle>::Profile as crate::interface_manager::Profile>::InterfaceIdent,
+    ) -> bool {
+        process_frame(self.net_id, data, nsh, ident);
+        false // NoStdRouter doesn't do state transitions in process_frame
+    }
+
+    fn reset(&mut self) {
+        // net_id is pre-assigned, nothing to reset
     }
 }
 

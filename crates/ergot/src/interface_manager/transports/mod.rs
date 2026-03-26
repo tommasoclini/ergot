@@ -1,0 +1,15 @@
+//! Transport-agnostic RxWorker implementations.
+//!
+//! Each transport (embedded-io, USB bulk, etc.) is implemented once and
+//! works with any profile via the [`FrameProcessor`] trait.
+//!
+//! [`FrameProcessor`]: crate::interface_manager::FrameProcessor
+
+#[cfg(any(feature = "embedded-io-async-v0_6", feature = "embedded-io-async-v0_7"))]
+pub mod eio;
+
+#[cfg(feature = "embassy-usb-v0_5")]
+pub mod eusb_0_5;
+
+#[cfg(feature = "embassy-usb-v0_6")]
+pub mod eusb_0_6;

@@ -33,10 +33,7 @@ pub mod embedded_io_async_v0_6 {
             traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
         },
         interface_manager::{
-            profiles::direct_edge::{
-                DirectEdge,
-                eio::{self, EmbeddedIoManager},
-            },
+            profiles::direct_edge::{DirectEdge, EmbeddedIoManager},
             utils::cobs_stream::Sink,
         },
     };
@@ -48,7 +45,6 @@ pub mod embedded_io_async_v0_6 {
     pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
     pub type Stack<Q, R> = NetStack<R, EmbeddedIoManager<Q>>;
     pub type BaseStack<Q, R> = crate::NetStack<R, EmbeddedIoManager<Q>>;
-    pub type RxWorker<Q, R, D> = eio::RxWorker<&'static BaseStack<Q, R>, D>;
 
     pub const fn new_target_stack<Q, R>(producer: StreamProducer<Q>, mtu: u16) -> Stack<Q, R>
     where
@@ -68,10 +64,7 @@ pub mod embedded_io_async_v0_7 {
             traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
         },
         interface_manager::{
-            profiles::direct_edge::{
-                DirectEdge,
-                eio::{self, EmbeddedIoManager},
-            },
+            profiles::direct_edge::{DirectEdge, EmbeddedIoManager},
             utils::cobs_stream::Sink,
         },
     };
@@ -83,7 +76,6 @@ pub mod embedded_io_async_v0_7 {
     pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
     pub type Stack<Q, R> = NetStack<R, EmbeddedIoManager<Q>>;
     pub type BaseStack<Q, R> = crate::NetStack<R, EmbeddedIoManager<Q>>;
-    pub type RxWorker<Q, R, D> = eio::RxWorker<&'static BaseStack<Q, R>, D>;
 
     pub const fn new_target_stack<Q, R>(producer: StreamProducer<Q>, mtu: u16) -> Stack<Q, R>
     where
@@ -103,10 +95,7 @@ pub mod embassy_usb_v0_5 {
             traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
         },
         interface_manager::{
-            profiles::direct_edge::{
-                DirectEdge,
-                eusb_0_5::{self, EmbassyUsbManager},
-            },
+            profiles::direct_edge::{DirectEdge, EmbassyUsbManager},
             utils::framed_stream::Sink,
         },
     };
@@ -122,7 +111,6 @@ pub mod embassy_usb_v0_5 {
     pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
     pub type Stack<Q, R> = NetStack<R, EmbassyUsbManager<Q>>;
     pub type BaseStack<Q, R> = crate::NetStack<R, EmbassyUsbManager<Q>>;
-    pub type RxWorker<Q, R, D> = eusb_0_5::RxWorker<Q, &'static BaseStack<Q, R>, D>;
 
     pub const fn new_target_stack<Q, R>(producer: FramedProducer<Q, u16>, mtu: u16) -> Stack<Q, R>
     where
@@ -142,10 +130,7 @@ pub mod embassy_usb_v0_6 {
             traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
         },
         interface_manager::{
-            profiles::direct_edge::{
-                DirectEdge,
-                eusb_0_6::{self, EmbassyUsbManager},
-            },
+            profiles::direct_edge::{DirectEdge, EmbassyUsbManager},
             utils::framed_stream::Sink,
         },
     };
@@ -161,7 +146,6 @@ pub mod embassy_usb_v0_6 {
     pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
     pub type Stack<Q, R> = NetStack<R, EmbassyUsbManager<Q>>;
     pub type BaseStack<Q, R> = crate::NetStack<R, EmbassyUsbManager<Q>>;
-    pub type RxWorker<Q, R, D> = eusb_0_6::RxWorker<Q, &'static BaseStack<Q, R>, D>;
 
     pub const fn new_target_stack<Q, R>(producer: FramedProducer<Q, u16>, mtu: u16) -> Stack<Q, R>
     where
