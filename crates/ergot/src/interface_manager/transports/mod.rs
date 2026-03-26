@@ -16,3 +16,12 @@ pub mod eusb_0_6;
 
 #[cfg(feature = "tokio-std")]
 pub mod tokio_cobs_stream;
+
+#[cfg(feature = "tokio-std")]
+pub mod tokio_udp;
+
+#[cfg(feature = "nusb-v0_1")]
+pub mod nusb;
+
+#[cfg(feature = "embassy-net-v0_7")]
+pub mod embassy_net_udp;
