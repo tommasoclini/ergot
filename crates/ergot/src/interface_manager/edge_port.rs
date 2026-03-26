@@ -23,10 +23,14 @@ use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{
         Interface, InterfaceSendError, InterfaceSink, InterfaceState, SetStateError,
-        profiles::direct_edge::{CENTRAL_NODE_ID, EDGE_NODE_ID},
     },
     logging::trace,
 };
+
+/// Node ID for the central (controller/router) side of a point-to-point link.
+pub const CENTRAL_NODE_ID: u8 = 1;
+/// Node ID for the edge (target/downstream) side of a point-to-point link.
+pub const EDGE_NODE_ID: u8 = 2;
 
 /// A single point-to-point interface port.
 ///

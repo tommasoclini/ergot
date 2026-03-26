@@ -77,11 +77,8 @@ where
         frame_buf: &mut [u8],
         scratch_buf: &mut [u8],
     ) -> Result<(), R::Error> {
-        let res = self.run_inner(frame_buf, scratch_buf).await;
-        self.nsh.stack().manage_profile(|im| {
-            _ = im.set_interface_state(self.ident.into(), InterfaceState::Down);
-        });
-        res
+        self.run_inner(frame_buf, scratch_buf).await
+        // Drop impl will set interface state to Down
     }
 
     async fn run_inner(

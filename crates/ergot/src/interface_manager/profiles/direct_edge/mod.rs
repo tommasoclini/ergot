@@ -44,8 +44,7 @@ use crate::{
     wire_frames::de_frame,
 };
 
-pub const CENTRAL_NODE_ID: u8 = 1;
-pub const EDGE_NODE_ID: u8 = 2;
+pub use crate::interface_manager::edge_port::{CENTRAL_NODE_ID, EDGE_NODE_ID};
 
 pub enum SetNetIdError {
     CantSetZero,

@@ -38,7 +38,7 @@ use crate::{Header, HeaderSeq, ProtocolError};
 use postcard_schema::Schema;
 use serde::{Deserialize, Serialize};
 
-pub mod edge_port;
+pub(crate) mod edge_port;
 pub mod interface_impls;
 pub mod multi;
 pub mod profiles;

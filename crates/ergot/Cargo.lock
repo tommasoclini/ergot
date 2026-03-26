@@ -604,6 +604,7 @@ dependencies = [
  "postcard",
  "postcard-schema",
  "rand",
+ "rand_core",
  "rtt-target",
  "serde",
  "ssmarshal",
