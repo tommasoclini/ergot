@@ -3,13 +3,11 @@
 //! A router profile for `no_std` environments that can manage up to `N`
 //! directly connected downstream (edge) devices, with up to `S` additional
 //! seed-assigned routes for bridge devices. Uses [`heapless::Vec`] for
-//! storage, [`EdgePort`] for per-interface state management, and
+//! storage, `EdgePort` for per-interface state management, and
 //! `embassy-time` for lease expiration.
 //!
 //! Requires the `nostd-seed-router` feature which enables `embassy-time`
 //! and `rand_core` dependencies.
-//!
-//! [`EdgePort`]: crate::interface_manager::edge_port::EdgePort
 
 use embassy_time::{Duration, Instant};
 use rand_core::RngCore;

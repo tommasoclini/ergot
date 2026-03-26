@@ -51,7 +51,7 @@ pub enum SetNetIdError {
     NoActiveSink,
 }
 
-/// Edge device profile backed by a single [`EdgePort`].
+/// Edge device profile backed by a single `EdgePort`.
 pub struct DirectEdge<I: Interface> {
     port: EdgePort<I>,
     /// Closer for signaling workers to stop. Set by `register_*_stream`,
