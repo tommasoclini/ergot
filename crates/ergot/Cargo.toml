@@ -45,12 +45,14 @@ tokio-std = [
 embassy-usb-v0_5 = [
     "dep:embassy-usb-0_5",
     "dep:static_cell",
-    "dep:embassy-time"
+    "dep:embassy-time",
+    "dep:embassy-sync",
 ]
 embassy-usb-v0_6 = [
     "dep:embassy-usb-0_6",
     "dep:static_cell",
-    "dep:embassy-time"
+    "dep:embassy-time",
+    "dep:embassy-sync",
 ]
 embassy-net-v0_7 = [
     "dep:embassy-net-0_7",
@@ -114,7 +116,6 @@ _all-features-hack = [
 alloc = [
   "postcard-schema/alloc"
 ]
-
 [dependencies]
 const-fnv1a-hash    = "1.1.0"
 critical-section    = "1.2.0"
@@ -167,6 +168,7 @@ tokio-serial-v5 = { version = "5.4.4", optional = true, package = "tokio-serial"
 # _all-features-hack
 ssmarshal = { version = "1.0", optional = true }
 portable-atomic = "1.11.1"
+embassy-sync = { version = "0.8", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio   = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time", "io-util", "net", "sync"] }

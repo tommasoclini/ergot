@@ -16,6 +16,8 @@ use bbqueue::{
     BBQueue,
     traits::{bbqhdl::BbqHandle, notifier::maitake::MaiNotSpsc, storage::Inline},
 };
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::watch::Watch;
 use static_cell::ConstStaticCell;
 
 use crate::interface_manager::{Interface, utils::framed_stream};
@@ -27,6 +29,20 @@ pub struct EmbassyInterface<Q: BbqHandle + 'static> {
 
 /// A small type for handling USB device name enumeration
 struct ErgotHandler {}
+
+/// USB suspend state, observable by RxWorkers via [`Watch::receiver`].
+///
+/// Sent by [`ErgotHandler`] on suspend (`true`), resume (`false`), and
+/// reset (`false`) events. RxWorkers create a [`Receiver`] and `select`
+/// on [`Receiver::changed`] for instant disconnect detection.
+///
+/// N=2: one receiver slot for the RxWorker, one spare.
+///
+/// **Note**: assumes a single USB peripheral per device.
+///
+/// [`Receiver`]: embassy_sync::watch::Receiver
+/// [`Receiver::changed`]: embassy_sync::watch::Receiver::changed
+pub(crate) static USB_SUSPEND: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new_with(false);
 
 /// A type alias for the outgoing packet queue typically used by the [`EmbassyInterface`]
 pub type Queue<const N: usize, C> = BBQueue<Inline<N>, C, MaiNotSpsc>;
@@ -384,6 +400,14 @@ pub mod eusb_0_5 {
     // impl ErgotHandler
 
     impl embassy_usb_0_5::Handler for ErgotHandler {
+        fn suspended(&mut self, suspended: bool) {
+            super::USB_SUSPEND.sender().send(suspended);
+        }
+
+        fn reset(&mut self) {
+            super::USB_SUSPEND.sender().send(false);
+        }
+
         fn get_string(
             &mut self,
             index: embassy_usb_0_5::types::StringIndex,
@@ -638,6 +662,14 @@ pub mod eusb_0_6 {
     }
 
     impl embassy_usb_0_6::Handler for ErgotHandler {
+        fn suspended(&mut self, suspended: bool) {
+            super::USB_SUSPEND.sender().send(suspended);
+        }
+
+        fn reset(&mut self) {
+            super::USB_SUSPEND.sender().send(false);
+        }
+
         fn get_string(
             &mut self,
             index: embassy_usb_0_6::types::StringIndex,
