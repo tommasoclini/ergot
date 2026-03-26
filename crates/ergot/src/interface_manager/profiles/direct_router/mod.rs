@@ -24,7 +24,7 @@ use crate::{
     interface_manager::{
         DeregisterError, Interface, InterfaceSendError, InterfaceState, Profile,
         SeedAssignmentError, SeedNetAssignment, SeedRefreshError, SetStateError,
-        profiles::direct_edge::CENTRAL_NODE_ID,
+        edge_port::EdgePort, profiles::direct_edge::CENTRAL_NODE_ID,
     },
     net_stack::NetStackHandle,
     wire_frames::de_frame,
@@ -46,8 +46,7 @@ pub mod nusb_0_1;
 pub mod tokio_serial_5;
 
 struct Node<I: Interface> {
-    // TODO: can we JUST use an interface here, NOT a profile?
-    edge: edge_interface_plus::EdgeInterfacePlus<I>,
+    edge: EdgePort<I>,
     net_id: u16,
     ident: u64,
     #[cfg(feature = "std")]
@@ -200,7 +199,7 @@ impl<I: Interface> Profile for DirectRouter<I> {
 
     fn interface_state(&mut self, ident: Self::InterfaceIdent) -> Option<InterfaceState> {
         let node = self.direct_links.get_mut(&ident)?;
-        node.edge.interface_state(())
+        Some(node.edge.state())
     }
 
     fn set_interface_state(
@@ -211,7 +210,7 @@ impl<I: Interface> Profile for DirectRouter<I> {
         let Some(node) = self.direct_links.get_mut(&ident) else {
             return Err(SetStateError::InterfaceNotFound);
         };
-        node.edge.set_interface_state((), state)
+        node.edge.set_state(state)
     }
 
     fn request_seed_net_assign(
@@ -320,7 +319,7 @@ impl<I: Interface> DirectRouter<I> {
     pub fn get_nets(&mut self) -> Vec<u16> {
         self.direct_links
             .iter_mut()
-            .filter_map(|(_ident, n)| match n.edge.interface_state(())? {
+            .filter_map(|(_ident, n)| match n.edge.state() {
                 InterfaceState::Down => None,
                 InterfaceState::Inactive => None,
                 InterfaceState::ActiveLocal { .. } => None,
@@ -333,7 +332,7 @@ impl<I: Interface> DirectRouter<I> {
         &'b mut self,
         hdr: &Header,
         source: Option<<Self as Profile>::InterfaceIdent>,
-    ) -> Result<&'b mut edge_interface_plus::EdgeInterfacePlus<I>, InterfaceSendError> {
+    ) -> Result<&'b mut EdgePort<I>, InterfaceSendError> {
         // todo: make this state impossible? enum of dst w/ or w/o key?
         if hdr.dst.port_id == 0 && hdr.any_all.is_none() {
             return Err(InterfaceSendError::AnyPortMissingKey);
@@ -466,7 +465,7 @@ impl<I: Interface> DirectRouter<I> {
         self.direct_links.insert(
             intfc_id,
             Node {
-                edge: edge_interface_plus::EdgeInterfacePlus::new_controller(
+                edge: EdgePort::new_controller(
                     sink,
                     InterfaceState::Active {
                         net_id,
@@ -614,178 +613,5 @@ pub fn process_frame<N>(
         }
     } else {
         warn!("Decode error! Ignoring frame on net_id {}", net_id);
-    }
-}
-
-mod edge_interface_plus {
-    use crate::logging::trace;
-    use serde::Serialize;
-
-    use crate::{
-        Header, HeaderSeq, ProtocolError,
-        interface_manager::{
-            Interface, InterfaceSendError, InterfaceSink, InterfaceState, SetStateError,
-            profiles::direct_edge::{CENTRAL_NODE_ID, EDGE_NODE_ID},
-        },
-    };
-
-    // TODO: call this something like "point to point edge"
-    pub struct EdgeInterfacePlus<I: Interface> {
-        sink: I::Sink,
-        seq_no: u16,
-        state: InterfaceState,
-        own_node_id: u8,
-        other_node_id: u8,
-    }
-
-    impl<I: Interface> EdgeInterfacePlus<I> {
-        pub const fn new_controller(sink: I::Sink, state: InterfaceState) -> Self {
-            Self {
-                sink,
-                seq_no: 0,
-                state,
-                own_node_id: CENTRAL_NODE_ID,
-                other_node_id: EDGE_NODE_ID,
-            }
-        }
-    }
-
-    impl<I: Interface> EdgeInterfacePlus<I> {
-        fn common_send<'b>(
-            &'b mut self,
-            hdr: &Header,
-        ) -> Result<(&'b mut I::Sink, HeaderSeq), InterfaceSendError> {
-            let net_id = match &self.state {
-                InterfaceState::Down | InterfaceState::Inactive => {
-                    return Err(InterfaceSendError::NoRouteToDest);
-                }
-                InterfaceState::ActiveLocal { .. } => {
-                    // TODO: maybe also handle this?
-                    return Err(InterfaceSendError::NoRouteToDest);
-                }
-                InterfaceState::Active { net_id, node_id: _ } => *net_id,
-            };
-
-            trace!("{} common_send", hdr);
-
-            // TODO: when this WAS a real Profile, we did a lot of these things, but
-            // now they should be done by the router. For now, we just have asserts,
-            // eventually we should relax this to debug_asserts?
-            assert!(net_id != 0);
-            let for_us = hdr.dst.network_id == net_id && hdr.dst.node_id == self.own_node_id;
-            assert!(!for_us);
-
-            let mut hdr = hdr.clone();
-
-            // If the source is local, rewrite the source using this interface's
-            // information so responses can find their way back here
-            if hdr.src.net_node_any() {
-                // todo: if we know the destination is EXACTLY this network,
-                // we could leave the network_id local to allow for shorter
-                // addresses
-                hdr.src.network_id = net_id;
-                hdr.src.node_id = self.own_node_id;
-            }
-
-            // If this is a broadcast message, update the destination, ignoring
-            // whatever was there before
-            if hdr.dst.port_id == 255 {
-                hdr.dst.network_id = net_id;
-                hdr.dst.node_id = self.other_node_id;
-            }
-
-            // If this message has no seq_no, assign it one
-            let header = hdr.to_headerseq_or_with_seq(|| {
-                let seq_no = self.seq_no;
-                self.seq_no = self.seq_no.wrapping_add(1);
-                seq_no
-            });
-            if [0, 255].contains(&hdr.dst.port_id) && hdr.any_all.is_none() {
-                return Err(InterfaceSendError::AnyPortMissingKey);
-            }
-
-            Ok((&mut self.sink, header))
-        }
-    }
-
-    /// NOTE: this LOOKS like a profile impl, because it was, but it's actually not, because
-    /// this version of DirectEdge only serves DirectRouter
-    impl<I: Interface> EdgeInterfacePlus<I> {
-        pub(super) fn send<T: Serialize>(
-            &mut self,
-            hdr: &Header,
-            data: &T,
-        ) -> Result<(), InterfaceSendError> {
-            let (intfc, header) = self.common_send(hdr)?;
-
-            let res = intfc.send_ty(&header, data);
-
-            match res {
-                Ok(()) => Ok(()),
-                Err(()) => Err(InterfaceSendError::InterfaceFull),
-            }
-        }
-
-        pub(super) fn send_err(
-            &mut self,
-            hdr: &Header,
-            err: ProtocolError,
-        ) -> Result<(), InterfaceSendError> {
-            let (intfc, header) = self.common_send(hdr)?;
-
-            let res = intfc.send_err(&header, err);
-
-            match res {
-                Ok(()) => Ok(()),
-                Err(()) => Err(InterfaceSendError::InterfaceFull),
-            }
-        }
-
-        pub(super) fn send_raw(
-            &mut self,
-            hdr: &HeaderSeq,
-            data: &[u8],
-        ) -> Result<(), InterfaceSendError> {
-            let nshdr: Header = hdr.clone().into();
-            let (intfc, header) = self.common_send(&nshdr)?;
-            let res = intfc.send_raw(&header, data);
-
-            match res {
-                Ok(()) => Ok(()),
-                Err(()) => Err(InterfaceSendError::InterfaceFull),
-            }
-        }
-
-        pub(super) fn interface_state(&mut self, _ident: ()) -> Option<InterfaceState> {
-            Some(self.state)
-        }
-
-        pub(super) fn set_interface_state(
-            &mut self,
-            _ident: (),
-            state: InterfaceState,
-        ) -> Result<(), SetStateError> {
-            match state {
-                InterfaceState::Down => {
-                    self.state = InterfaceState::Down;
-                }
-                InterfaceState::Inactive => {
-                    self.state = InterfaceState::Inactive;
-                }
-                InterfaceState::ActiveLocal { node_id } => {
-                    if node_id != self.own_node_id {
-                        return Err(SetStateError::InvalidNodeId);
-                    }
-                    self.state = InterfaceState::ActiveLocal { node_id };
-                }
-                InterfaceState::Active { net_id, node_id } => {
-                    if node_id != self.own_node_id {
-                        return Err(SetStateError::InvalidNodeId);
-                    }
-                    self.state = InterfaceState::Active { net_id, node_id };
-                }
-            }
-            Ok(())
-        }
     }
 }

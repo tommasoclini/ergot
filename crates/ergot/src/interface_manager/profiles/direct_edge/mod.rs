@@ -10,7 +10,7 @@
 //! any outgoing packets, rather than trying to determine whether that packet is
 //! actually routable to a node on the network.
 
-use crate::logging::{debug, trace, warn};
+use crate::logging::{debug, warn};
 
 use serde::Serialize;
 
@@ -38,27 +38,22 @@ pub mod embassy_net_udp_0_7;
 use crate::{
     Header, HeaderSeq, ProtocolError,
     interface_manager::{
-        Interface, InterfaceSendError, InterfaceSink, InterfaceState, Profile, SetStateError,
+        Interface, InterfaceSendError, InterfaceState, Profile, SetStateError, edge_port::EdgePort,
     },
     net_stack::NetStackHandle,
     wire_frames::de_frame,
 };
 
-pub const CENTRAL_NODE_ID: u8 = 1;
-pub const EDGE_NODE_ID: u8 = 2;
+pub use crate::interface_manager::edge_port::{CENTRAL_NODE_ID, EDGE_NODE_ID};
 
 pub enum SetNetIdError {
     CantSetZero,
     NoActiveSink,
 }
 
-// TODO: call this something like "point to point edge"
+/// Edge device profile backed by a single `EdgePort`.
 pub struct DirectEdge<I: Interface> {
-    sink: I::Sink,
-    seq_no: u16,
-    state: InterfaceState,
-    own_node_id: u8,
-    other_node_id: u8,
+    port: EdgePort<I>,
     /// Closer for signaling workers to stop. Set by `register_*_stream`,
     /// closed when the interface transitions to `Down`.
     #[cfg(feature = "std")]
@@ -68,11 +63,7 @@ pub struct DirectEdge<I: Interface> {
 impl<I: Interface> DirectEdge<I> {
     pub const fn new_target(sink: I::Sink) -> Self {
         Self {
-            sink,
-            seq_no: 0,
-            state: InterfaceState::Down,
-            own_node_id: EDGE_NODE_ID,
-            other_node_id: CENTRAL_NODE_ID,
+            port: EdgePort::new_target(sink),
             #[cfg(feature = "std")]
             closer: None,
         }
@@ -80,11 +71,7 @@ impl<I: Interface> DirectEdge<I> {
 
     pub const fn new_controller(sink: I::Sink, state: InterfaceState) -> Self {
         Self {
-            sink,
-            seq_no: 0,
-            state,
-            own_node_id: CENTRAL_NODE_ID,
-            other_node_id: EDGE_NODE_ID,
+            port: EdgePort::new_controller(sink, state),
             #[cfg(feature = "std")]
             closer: None,
         }
@@ -99,7 +86,7 @@ impl<I: Interface> DirectEdge<I> {
         if let Some(closer) = self.closer.take() {
             closer.close();
         }
-        self.state = InterfaceState::Down;
+        let _ = self.port.set_state(InterfaceState::Down);
     }
 
     /// Store a closer WaitQueue so that workers are signaled when the
@@ -114,91 +101,13 @@ impl<I: Interface> DirectEdge<I> {
     }
 }
 
-impl<I: Interface> DirectEdge<I> {
-    fn common_send<'b>(
-        &'b mut self,
-        hdr: &Header,
-    ) -> Result<(&'b mut I::Sink, HeaderSeq), InterfaceSendError> {
-        let net_id = match &self.state {
-            InterfaceState::Down => {
-                trace!("{}: ignoring send, interface down", hdr);
-                return Err(InterfaceSendError::NoRouteToDest);
-            }
-            InterfaceState::Inactive => {
-                trace!("{}: ignoring send, interface inactive", hdr);
-                return Err(InterfaceSendError::NoRouteToDest);
-            }
-            InterfaceState::ActiveLocal { .. } => {
-                // TODO: maybe also handle this?
-                trace!("{}: ignoring send, interface local only", hdr);
-                return Err(InterfaceSendError::NoRouteToDest);
-            }
-            InterfaceState::Active { net_id, node_id: _ } => *net_id,
-        };
-
-        trace!("{}: common_send", hdr);
-
-        if net_id == 0 {
-            debug!("Attempted to send via interface before we have been assigned a net ID");
-            // No net_id yet, don't allow routing (todo: maybe broadcast?)
-            return Err(InterfaceSendError::NoRouteToDest);
-        }
-        // todo: we could probably keep a routing table of some kind, but for
-        // now, we treat this as a "default" route, all packets go
-
-        // TODO: a LOT of this is copy/pasted from the router, can we make this
-        // shared logic, or handled by the stack somehow?
-        if hdr.dst.network_id == net_id && hdr.dst.node_id == self.own_node_id {
-            return Err(InterfaceSendError::DestinationLocal);
-        }
-
-        // Now that we've filtered out "dest local" checks, see if there is
-        // any TTL left before we send to the next hop
-        let mut hdr = hdr.clone();
-        hdr.decrement_ttl()?;
-
-        // If the source is local, rewrite the source using this interface's
-        // information so responses can find their way back here
-        if hdr.src.net_node_any() {
-            // todo: if we know the destination is EXACTLY this network,
-            // we could leave the network_id local to allow for shorter
-            // addresses
-            hdr.src.network_id = net_id;
-            hdr.src.node_id = self.own_node_id;
-        }
-
-        // If this is a broadcast message, update the destination, ignoring
-        // whatever was there before
-        if hdr.dst.port_id == 255 {
-            hdr.dst.network_id = net_id;
-            hdr.dst.node_id = self.other_node_id;
-        }
-
-        let header = hdr.to_headerseq_or_with_seq(|| {
-            let seq_no = self.seq_no;
-            self.seq_no = self.seq_no.wrapping_add(1);
-            seq_no
-        });
-        if [0, 255].contains(&hdr.dst.port_id) && hdr.any_all.is_none() {
-            return Err(InterfaceSendError::AnyPortMissingKey);
-        }
-
-        Ok((&mut self.sink, header))
-    }
-}
-
 impl<I: Interface> Profile for DirectEdge<I> {
     type InterfaceIdent = ();
 
     fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError> {
-        let (intfc, header) = self.common_send(hdr)?;
-
-        let res = intfc.send_ty(&header, data);
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(()) => Err(InterfaceSendError::InterfaceFull),
-        }
+        let mut hdr = hdr.clone();
+        hdr.decrement_ttl()?;
+        self.port.send(&hdr, data)
     }
 
     fn send_err(
@@ -210,14 +119,9 @@ impl<I: Interface> Profile for DirectEdge<I> {
         if source.is_some() {
             return Err(InterfaceSendError::RoutingLoop);
         }
-        let (intfc, header) = self.common_send(hdr)?;
-
-        let res = intfc.send_err(&header, err);
-
-        match res {
-            Ok(()) => Ok(()),
-            Err(()) => Err(InterfaceSendError::InterfaceFull),
-        }
+        let mut hdr = hdr.clone();
+        hdr.decrement_ttl()?;
+        self.port.send_err(&hdr, err)
     }
 
     fn send_raw(
@@ -232,7 +136,7 @@ impl<I: Interface> Profile for DirectEdge<I> {
     }
 
     fn interface_state(&mut self, _ident: ()) -> Option<InterfaceState> {
-        Some(self.state)
+        Some(self.port.state())
     }
 
     fn set_interface_state(
@@ -240,27 +144,7 @@ impl<I: Interface> Profile for DirectEdge<I> {
         _ident: (),
         state: InterfaceState,
     ) -> Result<(), SetStateError> {
-        match state {
-            InterfaceState::Down => {
-                self.state = InterfaceState::Down;
-            }
-            InterfaceState::Inactive => {
-                self.state = InterfaceState::Inactive;
-            }
-            InterfaceState::ActiveLocal { node_id } => {
-                if node_id != self.own_node_id {
-                    return Err(SetStateError::InvalidNodeId);
-                }
-                self.state = InterfaceState::ActiveLocal { node_id };
-            }
-            InterfaceState::Active { net_id, node_id } => {
-                if node_id != self.own_node_id {
-                    return Err(SetStateError::InvalidNodeId);
-                }
-                self.state = InterfaceState::Active { net_id, node_id };
-            }
-        }
-        Ok(())
+        self.port.set_state(state)
     }
 }
 
