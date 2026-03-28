@@ -232,6 +232,13 @@ pub trait Interface {
 /// TX worker.
 #[allow(clippy::result_unit_err)]
 pub trait InterfaceSink {
+    /// Returns the maximum total ergot packet size (header + payload) that this
+    /// interface can accept for sending.
+    ///
+    /// If the interface performs internal fragmentation/reassembly, this returns
+    /// the max reassembled size, not the raw link frame size.
+    fn mtu(&self) -> u16;
+
     fn send_ty<T: Serialize>(&mut self, hdr: &HeaderSeq, body: &T) -> Result<(), ()>;
     fn send_raw(&mut self, hdr: &HeaderSeq, body: &[u8]) -> Result<(), ()>;
     fn send_err(&mut self, hdr: &HeaderSeq, err: ProtocolError) -> Result<(), ()>;
@@ -256,6 +263,8 @@ pub enum InterfaceSendError {
     TtlExpired,
     /// Interface detected that a packet should be routed back to its source
     RoutingLoop,
+    /// The serialized frame exceeds the outgoing interface's MTU
+    PacketTooBig { mtu: u16 },
 }
 
 /// An error when deregistering an interface
@@ -313,13 +322,16 @@ pub enum SetStateError {
 impl InterfaceSendError {
     pub fn to_error(&self) -> ProtocolError {
         match self {
-            InterfaceSendError::DestinationLocal => ProtocolError::ISE_DESTINATION_LOCAL,
-            InterfaceSendError::NoRouteToDest => ProtocolError::ISE_NO_ROUTE_TO_DEST,
-            InterfaceSendError::InterfaceFull => ProtocolError::ISE_INTERFACE_FULL,
-            InterfaceSendError::InternalError => ProtocolError::ISE_INTERNAL_ERROR,
-            InterfaceSendError::AnyPortMissingKey => ProtocolError::ISE_ANY_PORT_MISSING_KEY,
-            InterfaceSendError::TtlExpired => ProtocolError::ISE_TTL_EXPIRED,
-            InterfaceSendError::RoutingLoop => ProtocolError::ISE_ROUTING_LOOP,
+            InterfaceSendError::DestinationLocal => ProtocolError::IseDestinationLocal,
+            InterfaceSendError::NoRouteToDest => ProtocolError::IseNoRouteToDest,
+            InterfaceSendError::InterfaceFull => ProtocolError::IseInterfaceFull,
+            InterfaceSendError::InternalError => ProtocolError::IseInternalError,
+            InterfaceSendError::AnyPortMissingKey => ProtocolError::IseAnyPortMissingKey,
+            InterfaceSendError::TtlExpired => ProtocolError::IseTtlExpired,
+            InterfaceSendError::RoutingLoop => ProtocolError::IseRoutingLoop,
+            InterfaceSendError::PacketTooBig { mtu } => {
+                ProtocolError::IsePacketTooBig { mtu: *mtu }
+            }
         }
     }
 }

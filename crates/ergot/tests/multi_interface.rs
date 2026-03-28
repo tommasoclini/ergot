@@ -13,6 +13,9 @@ static LAST_SINK: AtomicU8 = AtomicU8::new(0);
 struct MockSinkA;
 
 impl InterfaceSink for MockSinkA {
+    fn mtu(&self) -> u16 {
+        2048
+    }
     fn send_ty<T: Serialize>(&mut self, _hdr: &HeaderSeq, _body: &T) -> Result<(), ()> {
         LAST_SINK.store(1, Ordering::SeqCst);
         Ok(())
@@ -30,6 +33,9 @@ impl InterfaceSink for MockSinkA {
 struct MockSinkB;
 
 impl InterfaceSink for MockSinkB {
+    fn mtu(&self) -> u16 {
+        2048
+    }
     fn send_ty<T: Serialize>(&mut self, _hdr: &HeaderSeq, _body: &T) -> Result<(), ()> {
         LAST_SINK.store(2, Ordering::SeqCst);
         Ok(())
@@ -47,6 +53,9 @@ impl InterfaceSink for MockSinkB {
 struct MockSinkC;
 
 impl InterfaceSink for MockSinkC {
+    fn mtu(&self) -> u16 {
+        2048
+    }
     fn send_ty<T: Serialize>(&mut self, _hdr: &HeaderSeq, _body: &T) -> Result<(), ()> {
         LAST_SINK.store(3, Ordering::SeqCst);
         Ok(())
@@ -121,7 +130,7 @@ fn multi_interface_dispatches_to_correct_sink() {
 
     let mut sink_c: TestSink = TestSink::C(MockSinkC);
     LAST_SINK.store(0, Ordering::SeqCst);
-    sink_c.send_err(&hdr, ProtocolError::RESERVED).unwrap();
+    sink_c.send_err(&hdr, ProtocolError::Reserved).unwrap();
     assert_eq!(LAST_SINK.load(Ordering::SeqCst), 3);
 }
 

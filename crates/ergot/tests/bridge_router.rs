@@ -28,6 +28,9 @@ impl RecordingSink {
 }
 
 impl InterfaceSink for RecordingSink {
+    fn mtu(&self) -> u16 {
+        2048
+    }
     fn send_ty<T: Serialize>(&mut self, hdr: &HeaderSeq, _body: &T) -> Result<(), ()> {
         self.log
             .lock()
@@ -474,7 +477,7 @@ fn bridge_send_err_forwards_upstream() {
     };
 
     router
-        .send_err(&hdr, ProtocolError::NSSE_NO_ROUTE, None)
+        .send_err(&hdr, ProtocolError::NsseNoRoute, None)
         .unwrap();
 
     let entries = log.lock().unwrap();

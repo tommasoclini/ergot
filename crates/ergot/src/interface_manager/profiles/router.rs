@@ -831,14 +831,34 @@ pub fn process_frame<N>(
     let nshdr: Header = hdr.clone().into();
 
     let res = match frame.body {
-        Ok(body) => nsh.stack().send_raw(&hdr, body, ident),
-        Err(e) => nsh.stack().send_err(&nshdr, e, Some(ident)),
+        Ok(body) => nsh.stack().send_raw(&hdr, body, ident.clone()),
+        Err(e) => nsh.stack().send_err(&nshdr, e, Some(ident.clone())),
     };
 
-    #[allow(unused_variables)]
     match res {
         Ok(()) => {
             debug!("{}: frame delivered", hdr);
+        }
+        Err(crate::net_stack::NetStackSendError::InterfaceSend(
+            InterfaceSendError::PacketTooBig { mtu },
+        )) => {
+            warn!(
+                "{} packet too big for outgoing interface (mtu={})",
+                hdr, mtu
+            );
+            let err_hdr = Header {
+                src: hdr.dst,
+                dst: hdr.src,
+                any_all: None,
+                seq_no: Some(hdr.seq_no),
+                kind: crate::FrameKind::PROTOCOL_ERROR,
+                ttl: crate::DEFAULT_TTL,
+            };
+            let _ = nsh.stack().send_err(
+                &err_hdr,
+                ProtocolError::IsePacketTooBig { mtu },
+                Some(ident),
+            );
         }
         Err(e) => {
             warn!("{} recv->send error: {:?}", hdr, e);
