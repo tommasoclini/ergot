@@ -53,7 +53,7 @@ pub mod utils;
 /// written once and works with every profile.
 ///
 /// [`DirectEdge`]: profiles::direct_edge::DirectEdge
-/// [`NoStdRouter`]: profiles::no_std_router::NoStdRouter
+/// [`NoStdRouter`]: profiles::router::Router
 pub trait FrameProcessor<N: crate::net_stack::NetStackHandle> {
     /// Process a raw decoded frame.
     ///
@@ -188,6 +188,19 @@ pub trait Profile {
     ) -> Result<SeedNetAssignment, SeedAssignmentError> {
         _ = source_net;
         Err(SeedAssignmentError::ProfileCantSeed)
+    }
+
+    /// Reassign a downstream interface's net_id.
+    ///
+    /// Used by bridge seed routing clients after receiving a globally-routable
+    /// net_id from a seed router. Not all profiles support this — the default
+    /// returns [`SetStateError::InterfaceNotFound`].
+    fn reassign_interface_net_id(
+        &mut self,
+        _ident: Self::InterfaceIdent,
+        _new_net_id: u16,
+    ) -> Result<(), SetStateError> {
+        Err(SetStateError::InterfaceNotFound)
     }
 
     /// Request the refresh of a Net ID assignment from this profile

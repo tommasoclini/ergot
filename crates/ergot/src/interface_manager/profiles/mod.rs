@@ -6,8 +6,5 @@
 pub mod direct_edge;
 pub mod null;
 
-#[cfg(feature = "nostd-seed-router")]
-pub mod no_std_router;
-
-#[cfg(feature = "tokio-std")]
-pub mod direct_router;
+#[cfg(any(feature = "std", feature = "nostd-seed-router"))]
+pub mod router;

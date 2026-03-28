@@ -37,14 +37,14 @@ where
     R: AsyncReadExt + Unpin,
     P: FrameProcessor<N>,
 {
-    pub(crate) nsh: N,
-    pub(crate) reader: R,
-    pub(crate) closer: Arc<WaitQueue>,
-    pub(crate) processor: P,
-    pub(crate) ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
-    pub(crate) liveness: Option<LivenessConfig>,
-    pub(crate) state_notify: Option<Arc<WaitQueue>>,
-    pub(crate) cobs_buf_size: usize,
+    pub nsh: N,
+    pub reader: R,
+    pub closer: Arc<WaitQueue>,
+    pub processor: P,
+    pub ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
+    pub liveness: Option<LivenessConfig>,
+    pub state_notify: Option<Arc<WaitQueue>>,
+    pub cobs_buf_size: usize,
 }
 
 impl<N, R, P> CobsStreamRxWorker<N, R, P>
@@ -182,9 +182,9 @@ where
 ///
 /// On exit, calls `closer.close()` to ensure the RxWorker also shuts down.
 pub struct CobsStreamTxWorker<W: AsyncWriteExt + Unpin> {
-    pub(crate) writer: W,
-    pub(crate) consumer: StreamConsumer<StdQueue>,
-    pub(crate) closer: Arc<WaitQueue>,
+    pub writer: W,
+    pub consumer: StreamConsumer<StdQueue>,
+    pub closer: Arc<WaitQueue>,
 }
 
 impl<W: AsyncWriteExt + Unpin> CobsStreamTxWorker<W> {
@@ -302,19 +302,20 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Registration: DirectRouter
+// Registration: Router
 // ---------------------------------------------------------------------------
 
-use crate::interface_manager::profiles::direct_router::{DirectRouter, RouterFrameProcessor};
+use crate::interface_manager::profiles::router::{Router, RouterFrameProcessor};
 use crate::interface_manager::utils::cobs_stream::Sink;
 use crate::interface_manager::utils::std::new_std_queue;
+use rand_core::RngCore;
 
-/// Registration error for DirectRouter.
+/// Registration error for Router.
 #[derive(Debug, PartialEq)]
 pub struct RouterRegistrationError;
 
-/// Register a COBS-framed stream transport on a [`DirectRouter`] profile.
-pub async fn register_router<N, I, R, W>(
+/// Register a COBS-framed stream transport on a [`Router`] profile.
+pub async fn register_router<N, I, Rng, R, W, const M: usize, const SS: usize>(
     stack: N,
     reader: R,
     writer: W,
@@ -322,17 +323,19 @@ pub async fn register_router<N, I, R, W>(
     outgoing_buffer_size: usize,
     liveness: Option<LivenessConfig>,
     state_notify: Option<Arc<WaitQueue>>,
-) -> Result<u64, RouterRegistrationError>
+) -> Result<u8, RouterRegistrationError>
 where
     I: Interface<Sink = Sink<StdQueue>>,
-    N: NetStackHandle<Profile = DirectRouter<I>> + Send + 'static,
+    Rng: RngCore + Send + 'static,
+    N: NetStackHandle<Profile = Router<I, Rng, M, SS>> + Send + 'static,
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
     let q: StdQueue = new_std_queue(outgoing_buffer_size);
     let res = stack.stack().manage_profile(|im| {
-        let ident =
-            im.register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))?;
+        let ident = im
+            .register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))
+            .ok()?;
         let state = im.interface_state(ident)?;
         match state {
             InterfaceState::Active { net_id, node_id: _ } => Some((ident, net_id)),
@@ -391,4 +394,86 @@ where
     );
 
     Ok(ident)
+}
+
+// ---------------------------------------------------------------------------
+// Registration: Bridge upstream
+// ---------------------------------------------------------------------------
+
+use crate::interface_manager::profiles::router::UPSTREAM_IDENT;
+
+/// Registration error for bridge upstream.
+#[derive(Debug, PartialEq)]
+pub struct BridgeUpstreamRegistrationError;
+
+/// Register a COBS-framed stream as the upstream interface of a bridge [`Router`].
+///
+/// Uses [`EdgeFrameProcessor`] to discover the upstream net_id from
+/// incoming frames and [`UPSTREAM_IDENT`] as the interface identifier.
+/// The upstream starts in [`InterfaceState::Inactive`].
+///
+/// [`Router`]: crate::interface_manager::profiles::router::Router
+#[allow(clippy::too_many_arguments)]
+pub async fn register_bridge_upstream<N, R, W>(
+    stack: N,
+    reader: R,
+    writer: W,
+    queue: StdQueue,
+    liveness: Option<LivenessConfig>,
+    state_notify: Option<Arc<WaitQueue>>,
+) -> Result<(), BridgeUpstreamRegistrationError>
+where
+    N: NetStackHandle + Send + 'static,
+    <N::Profile as Profile>::InterfaceIdent: From<u8> + Send,
+    R: AsyncReadExt + Unpin + Send + 'static,
+    W: AsyncWriteExt + Unpin + Send + 'static,
+{
+    let closer = Arc::new(WaitQueue::new());
+
+    stack
+        .stack()
+        .manage_profile(|im| {
+            im.set_interface_state(UPSTREAM_IDENT.into(), InterfaceState::Inactive)
+        })
+        .map_err(|_| BridgeUpstreamRegistrationError)?;
+    if let Some(notify) = &state_notify {
+        notify.wake_all();
+    }
+
+    let notify_clone = state_notify.clone();
+    let stack_clone = stack.clone();
+
+    let mut rx_worker = CobsStreamRxWorker {
+        nsh: stack,
+        reader,
+        closer: closer.clone(),
+        processor: EdgeFrameProcessor::new(),
+        ident: UPSTREAM_IDENT.into(),
+        liveness,
+        state_notify,
+        cobs_buf_size: 1024 * 1024,
+    };
+
+    tokio::task::spawn(async move {
+        let close = rx_worker.closer.clone();
+        select! {
+            _run = rx_worker.run() => { close.close(); },
+            _clf = close.wait() => {},
+        }
+        stack_clone.stack().manage_profile(|im| {
+            _ = im.set_interface_state(UPSTREAM_IDENT.into(), InterfaceState::Down);
+        });
+        if let Some(notify) = &notify_clone {
+            notify.wake_all();
+        }
+    });
+    tokio::task::spawn(
+        CobsStreamTxWorker {
+            writer,
+            consumer: <StdQueue as BbqHandle>::stream_consumer(&queue),
+            closer: closer.clone(),
+        }
+        .run(),
+    );
+    Ok(())
 }

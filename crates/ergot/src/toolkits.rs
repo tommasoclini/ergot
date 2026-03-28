@@ -203,7 +203,7 @@ pub mod tokio_tcp {
         InterfaceState,
         interface_impls::tokio_tcp::TokioTcpInterface,
         profiles::direct_edge::{DirectEdge, EdgeFrameProcessor},
-        profiles::direct_router::DirectRouter,
+        profiles::router::Router,
         transports::tokio_cobs_stream,
         utils::{cobs_stream, std::StdQueue},
     };
@@ -214,7 +214,8 @@ pub mod tokio_tcp {
 
     use crate::net_stack::ArcNetStack;
 
-    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioTcpInterface>>;
+    pub type RouterStack =
+        ArcNetStack<CriticalSectionRawMutex, Router<TokioTcpInterface, rand::rngs::StdRng, 64, 64>>;
     pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioTcpInterface>>;
 
     pub async fn register_router_interface(
@@ -222,9 +223,9 @@ pub mod tokio_tcp {
         socket: TcpStream,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, tokio_cobs_stream::RouterRegistrationError> {
+    ) -> Result<u8, tokio_cobs_stream::RouterRegistrationError> {
         let (rx, tx) = socket.into_split();
-        tokio_cobs_stream::register_router::<_, TokioTcpInterface, _, _>(
+        tokio_cobs_stream::register_router(
             stack.clone(),
             rx,
             tx,
@@ -269,7 +270,7 @@ pub mod tokio_udp {
         InterfaceState,
         interface_impls::tokio_udp::TokioUdpInterface,
         profiles::direct_edge::{CENTRAL_NODE_ID, DirectEdge, EdgeFrameProcessor},
-        profiles::direct_router::DirectRouter,
+        profiles::router::Router,
         transports::tokio_udp as udp_transport,
         utils::{framed_stream, std::StdQueue},
     };
@@ -280,7 +281,8 @@ pub mod tokio_udp {
 
     use crate::net_stack::ArcNetStack;
 
-    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioUdpInterface>>;
+    pub type RouterStack =
+        ArcNetStack<CriticalSectionRawMutex, Router<TokioUdpInterface, rand::rngs::StdRng, 64, 64>>;
     pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioUdpInterface>>;
 
     pub async fn register_router_interface(
@@ -288,8 +290,8 @@ pub mod tokio_udp {
         socket: UdpSocket,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, udp_transport::RouterRegistrationError> {
-        udp_transport::register_router::<_, TokioUdpInterface>(
+    ) -> Result<u8, udp_transport::RouterRegistrationError> {
+        udp_transport::register_router(
             stack.clone(),
             socket,
             max_ergot_packet_size,
@@ -440,8 +442,7 @@ pub mod tokio_stream {
 pub mod nusb_v0_1 {
     use crate::interface_manager::{
         interface_impls::nusb_bulk::NusbBulk, profiles::direct_edge::DirectEdge,
-        profiles::direct_router::DirectRouter, transports::nusb as nusb_transport,
-        utils::std::StdQueue,
+        profiles::router::Router, transports::nusb as nusb_transport, utils::std::StdQueue,
     };
     use mutex::raw_impls::cs::CriticalSectionRawMutex;
     use std::sync::Arc;
@@ -450,7 +451,8 @@ pub mod nusb_v0_1 {
 
     pub use crate::interface_manager::interface_impls::nusb_bulk::{NewDevice, find_new_devices};
 
-    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<NusbBulk>>;
+    pub type RouterStack =
+        ArcNetStack<CriticalSectionRawMutex, Router<NusbBulk, rand::rngs::StdRng, 64, 64>>;
     pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<NusbBulk>>;
 
     pub async fn register_router_interface(
@@ -458,8 +460,8 @@ pub mod nusb_v0_1 {
         device: NewDevice,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, nusb_transport::RouterRegistrationError> {
-        nusb_transport::register_router::<_, NusbBulk>(
+    ) -> Result<u8, nusb_transport::RouterRegistrationError> {
+        nusb_transport::register_router(
             stack.clone(),
             device,
             max_ergot_packet_size,
@@ -473,6 +475,8 @@ pub mod nusb_v0_1 {
         stack: &EdgeStack,
         device: NewDevice,
         queue: &StdQueue,
+        processor: crate::interface_manager::profiles::direct_edge::EdgeFrameProcessor,
+        initial_state: crate::interface_manager::InterfaceState,
         max_ergot_packet_size: u16,
         state_notify: Option<Arc<maitake_sync::WaitQueue>>,
     ) -> Result<(), nusb_transport::EdgeRegistrationError> {
@@ -480,6 +484,8 @@ pub mod nusb_v0_1 {
             stack.clone(),
             device,
             queue.clone(),
+            processor,
+            initial_state,
             max_ergot_packet_size,
             state_notify,
         )
@@ -492,7 +498,7 @@ pub mod tokio_serial_v5 {
     use crate::interface_manager::{
         interface_impls::tokio_stream::TokioStreamInterface,
         profiles::direct_edge::DirectEdge,
-        profiles::direct_router::DirectRouter,
+        profiles::router::Router,
         transports::tokio_serial,
         utils::{cobs_stream, std::StdQueue},
     };
@@ -501,7 +507,10 @@ pub mod tokio_serial_v5 {
 
     use crate::net_stack::ArcNetStack;
 
-    pub type RouterStack = ArcNetStack<CriticalSectionRawMutex, DirectRouter<TokioStreamInterface>>;
+    pub type RouterStack = ArcNetStack<
+        CriticalSectionRawMutex,
+        Router<TokioStreamInterface, rand::rngs::StdRng, 64, 64>,
+    >;
     pub type EdgeStack = ArcNetStack<CriticalSectionRawMutex, DirectEdge<TokioStreamInterface>>;
 
     pub async fn register_router_interface(
@@ -510,8 +519,8 @@ pub mod tokio_serial_v5 {
         baud: u32,
         max_ergot_packet_size: u16,
         outgoing_buffer_size: usize,
-    ) -> Result<u64, tokio_serial::RouterRegistrationError> {
-        tokio_serial::register_router::<_, TokioStreamInterface>(
+    ) -> Result<u8, tokio_serial::RouterRegistrationError> {
+        tokio_serial::register_router(
             stack.clone(),
             port,
             baud,

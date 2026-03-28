@@ -1,15 +1,20 @@
-//! No-std Router profile with seed router support
+//! Unified Router profile
 //!
-//! A router profile for `no_std` environments that can manage up to `N`
-//! directly connected downstream (edge) devices, with up to `S` additional
-//! seed-assigned routes for bridge devices. Uses [`heapless::Vec`] for
-//! storage, `EdgePort` for per-interface state management, and
-//! `embassy-time` for lease expiration.
+//! A single router profile that works on both `std` and `no_std` environments.
+//! Manages up to `N` directly connected downstream (edge) devices, with up to
+//! `S` additional seed-assigned routes for bridge devices.
 //!
-//! Requires the `nostd-seed-router` feature which enables `embassy-time`
-//! and `rand_core` dependencies.
+//! Uses [`heapless::Vec`] for storage, `EdgePort` for per-interface state,
+//! and injectable [`RngCore`] for token generation.
+//!
+//! Requires either `std` or `nostd-seed-router` feature (for time and RNG).
 
+#[cfg(feature = "std")]
+use std::time::{Duration, Instant};
+
+#[cfg(all(not(feature = "std"), feature = "nostd-seed-router"))]
 use embassy_time::{Duration, Instant};
+
 use rand_core::RngCore;
 use serde::Serialize;
 
@@ -39,6 +44,8 @@ struct Slot<I: Interface> {
     ident: u8,
     port: EdgePort<I>,
     net_id: u16,
+    #[cfg(feature = "std")]
+    closer: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
 }
 
 /// A seed-assigned route for a bridge device's downstream.
@@ -62,22 +69,44 @@ enum SeedRouteKind {
     Tombstone { clear_time: Instant },
 }
 
-/// A `no_std` router profile with seed router capability.
+/// The upstream interface port (bridge mode only).
+struct UpstreamPort<I: Interface> {
+    port: EdgePort<I>,
+    #[cfg(feature = "std")]
+    closer: Option<std::sync::Arc<maitake_sync::WaitQueue>>,
+}
+
+/// Reserved ident for the upstream interface (bridge mode).
+///
+/// This is `u8::MAX` (255), which means a router can have at most 255
+/// downstream interfaces (idents 0..254). The upstream, if present,
+/// always uses this ident.
+pub const UPSTREAM_IDENT: u8 = u8::MAX;
+
+/// A router profile with seed router capability and optional upstream.
 ///
 /// - `I`: Interface type (use [`multi_interface!`] for heterogeneous transports)
 /// - `R`: RNG implementing [`RngCore`] for generating refresh tokens
 /// - `N`: Maximum number of directly connected downstream interfaces
 /// - `S`: Maximum number of seed-assigned routes (for bridge downstream networks)
 ///
+/// **Root mode** (`new`/`new_std`): no upstream, acts as a seed router.
+/// **Bridge mode** (`new_bridge`): has an upstream interface, forwards
+/// unroutable traffic upstream. The upstream discovers its net_id from
+/// incoming frames (like a DirectEdge).
+///
+/// Works on both `std` and `no_std` (with `nostd-seed-router` feature).
+///
 /// [`multi_interface!`]: crate::multi_interface
-pub struct NoStdRouter<I: Interface, R: RngCore, const N: usize, const S: usize> {
+pub struct Router<I: Interface, R: RngCore, const N: usize, const S: usize> {
     net_id_ctr: u16,
     slots: heapless::Vec<Slot<I>, N>,
     seed_routes: heapless::Vec<SeedRoute, S>,
     rng: R,
+    upstream: Option<UpstreamPort<I>>,
 }
 
-/// Errors from [`NoStdRouter::register_interface`].
+/// Errors from [`Router::register_interface`].
 #[cfg_attr(feature = "defmt-v1", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegisterError {
@@ -87,7 +116,7 @@ pub enum RegisterError {
     NetIdsExhausted,
 }
 
-/// Errors from [`NoStdRouter::deregister_interface`].
+/// Errors from [`Router::deregister_interface`].
 #[cfg_attr(feature = "defmt-v1", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeregisterError {
@@ -95,18 +124,43 @@ pub enum DeregisterError {
     NotFound,
 }
 
-impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R, N, S> {
-    /// Create a new empty router with the given RNG.
+impl<I: Interface, R: RngCore, const N: usize, const S: usize> Router<I, R, N, S> {
+    /// Create a new root router (no upstream) with the given RNG.
     pub fn new(rng: R) -> Self {
         Self {
             net_id_ctr: 1,
             slots: heapless::Vec::new(),
             seed_routes: heapless::Vec::new(),
             rng,
+            upstream: None,
         }
     }
 
-    /// Allocate the next unique net_id.
+    /// Create a new bridge router with an upstream interface.
+    ///
+    /// The upstream interface starts in [`InterfaceState::Down`] and
+    /// discovers its net_id from incoming frames. Use [`UPSTREAM_IDENT`]
+    /// when creating the upstream RxWorker.
+    pub fn new_bridge(rng: R, upstream_sink: I::Sink) -> Self {
+        Self {
+            net_id_ctr: 1,
+            slots: heapless::Vec::new(),
+            seed_routes: heapless::Vec::new(),
+            rng,
+            upstream: Some(UpstreamPort {
+                port: EdgePort::new_target(upstream_sink),
+                #[cfg(feature = "std")]
+                closer: None,
+            }),
+        }
+    }
+
+    /// Returns `true` if this router has an upstream interface (bridge mode).
+    pub fn has_upstream(&self) -> bool {
+        self.upstream.is_some()
+    }
+
+    /// Allocate the next unique net_id (monotonic, never reused).
     fn alloc_net_id(&mut self) -> Result<u16, ()> {
         let net_id = self.net_id_ctr;
         if net_id == 0 || net_id == u16::MAX {
@@ -146,6 +200,39 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R,
                 ident,
                 port: EdgePort::new_controller(sink, state),
                 net_id,
+                #[cfg(feature = "std")]
+                closer: None,
+            })
+            .ok()
+            .expect("push after is_full check");
+
+        Ok(ident)
+    }
+
+    /// Register a new downstream interface without assigning a net_id.
+    ///
+    /// The interface starts in [`InterfaceState::Down`] with `net_id = 0`.
+    /// Use [`reassign_interface_net_id`](Profile::reassign_interface_net_id)
+    /// (typically via [`bridge_seed_assign`](crate::net_stack::services::bridge_seed_assign))
+    /// to assign a globally-routable net_id from a seed router.
+    ///
+    /// This is the preferred method for bridge downstream interfaces.
+    pub fn register_interface_pending(&mut self, sink: I::Sink) -> Result<u8, RegisterError> {
+        if self.slots.is_full() {
+            return Err(RegisterError::Full);
+        }
+
+        let ident = (0..N as u8)
+            .find(|id| !self.slots.iter().any(|s| s.ident == *id))
+            .expect("pigeonhole: fewer than N slots occupied, so a free ident in 0..N must exist");
+
+        self.slots
+            .push(Slot {
+                ident,
+                port: EdgePort::new_controller(sink, InterfaceState::Down),
+                net_id: 0,
+                #[cfg(feature = "std")]
+                closer: None,
             })
             .ok()
             .expect("push after is_full check");
@@ -162,7 +249,14 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R,
             .iter()
             .position(|s| s.ident == ident)
             .ok_or(DeregisterError::NotFound)?;
-        self.slots.swap_remove(pos);
+
+        let slot = self.slots.swap_remove(pos);
+
+        // Signal workers to stop
+        #[cfg(feature = "std")]
+        if let Some(closer) = &slot.closer {
+            closer.close();
+        }
 
         let now = Instant::now();
         for sr in self.seed_routes.iter_mut() {
@@ -182,6 +276,35 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R,
             .iter()
             .find(|s| s.ident == ident)
             .map(|s| s.net_id)
+    }
+
+    /// Store a closer WaitQueue for an interface, so that workers are
+    /// notified when the interface is deregistered.
+    #[cfg(feature = "std")]
+    pub fn set_interface_closer(
+        &mut self,
+        ident: u8,
+        closer: std::sync::Arc<maitake_sync::WaitQueue>,
+    ) {
+        if ident == UPSTREAM_IDENT {
+            if let Some(up) = self.upstream.as_mut() {
+                up.closer = Some(closer);
+            }
+        } else if let Some(slot) = self.slots.iter_mut().find(|s| s.ident == ident) {
+            slot.closer = Some(closer);
+        }
+    }
+
+    /// Return active net_ids.
+    #[cfg(feature = "std")]
+    pub fn get_nets(&self) -> Vec<u16> {
+        self.slots
+            .iter()
+            .filter_map(|s| match s.port.state() {
+                InterfaceState::Active { net_id, .. } => Some(net_id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Garbage-collect expired tombstones from the seed route table.
@@ -234,7 +357,8 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R,
             .find(|sr| sr.net_id == hdr.dst.network_id);
 
         let Some(sr) = sr else {
-            return Err(InterfaceSendError::NoRouteToDest);
+            // 3. Upstream fallback (bridge mode)
+            return self.find_upstream(source);
         };
 
         match &mut sr.kind {
@@ -274,9 +398,28 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> NoStdRouter<I, R,
 
         Ok(&mut self.slots[pos].port)
     }
+
+    /// Try to route through the upstream interface (bridge mode only).
+    fn find_upstream(
+        &mut self,
+        source: Option<u8>,
+    ) -> Result<&mut EdgePort<I>, InterfaceSendError> {
+        let Some(up) = self.upstream.as_mut() else {
+            return Err(InterfaceSendError::NoRouteToDest);
+        };
+        // Don't route back to upstream if that's where it came from
+        if source == Some(UPSTREAM_IDENT) {
+            return Err(InterfaceSendError::RoutingLoop);
+        }
+        Ok(&mut up.port)
+    }
 }
 
-impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStdRouter<I, R, N, S> {
+// ---------------------------------------------------------------------------
+// Profile implementation
+// ---------------------------------------------------------------------------
+
+impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for Router<I, R, N, S> {
     type InterfaceIdent = u8;
 
     fn send<T: Serialize>(&mut self, hdr: &Header, data: &T) -> Result<(), InterfaceSendError> {
@@ -286,7 +429,6 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
         }
 
         if hdr.dst.port_id == 255 {
-            // Broadcast: send to all interfaces except the origin net
             if hdr.any_all.is_none() {
                 return Err(InterfaceSendError::AnyPortMissingKey);
             }
@@ -300,6 +442,10 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
                 bhdr.dst.network_id = slot.net_id;
                 bhdr.dst.node_id = EDGE_NODE_ID;
                 any_good |= slot.port.send(&bhdr, data).is_ok();
+            }
+            // Also broadcast to upstream (bridge mode)
+            if let Some(up) = self.upstream.as_mut() {
+                any_good |= up.port.send(&hdr, data).is_ok();
             }
             if any_good {
                 Ok(())
@@ -338,11 +484,11 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
         }
 
         if hdr.dst.port_id == 255 {
-            // Broadcast: send to all interfaces except the source
             if hdr.any_all.is_none() {
                 return Err(InterfaceSendError::AnyPortMissingKey);
             }
-            if self.slots.is_empty() {
+            let has_any_interface = !self.slots.is_empty() || self.upstream.is_some();
+            if !has_any_interface {
                 return Err(InterfaceSendError::NoRouteToDest);
             }
 
@@ -359,6 +505,13 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
                 hdr.dst.node_id = EDGE_NODE_ID;
                 any_good |= slot.port.send_raw(&hdr, data).is_ok();
             }
+            // Also broadcast to upstream (bridge mode), unless source is upstream
+            if let Some(up) = self.upstream.as_mut()
+                && source != UPSTREAM_IDENT
+            {
+                default_error = InterfaceSendError::NoRouteToDest;
+                any_good |= up.port.send_raw(&hdr, data).is_ok();
+            }
             if any_good { Ok(()) } else { Err(default_error) }
         } else {
             let nshdr: Header = hdr.clone().into();
@@ -368,6 +521,9 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
     }
 
     fn interface_state(&mut self, ident: Self::InterfaceIdent) -> Option<InterfaceState> {
+        if ident == UPSTREAM_IDENT {
+            return self.upstream.as_ref().map(|up| up.port.state());
+        }
         self.slots
             .iter()
             .find(|s| s.ident == ident)
@@ -379,12 +535,37 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
         ident: Self::InterfaceIdent,
         state: InterfaceState,
     ) -> Result<(), SetStateError> {
+        if ident == UPSTREAM_IDENT {
+            return self
+                .upstream
+                .as_mut()
+                .ok_or(SetStateError::InterfaceNotFound)?
+                .port
+                .set_state(state);
+        }
         let slot = self
             .slots
             .iter_mut()
             .find(|s| s.ident == ident)
             .ok_or(SetStateError::InterfaceNotFound)?;
         slot.port.set_state(state)
+    }
+
+    fn reassign_interface_net_id(
+        &mut self,
+        ident: Self::InterfaceIdent,
+        new_net_id: u16,
+    ) -> Result<(), SetStateError> {
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|s| s.ident == ident)
+            .ok_or(SetStateError::InterfaceNotFound)?;
+        slot.net_id = new_net_id;
+        slot.port.set_state(InterfaceState::Active {
+            net_id: new_net_id,
+            node_id: CENTRAL_NODE_ID,
+        })
     }
 
     fn request_seed_net_assign(
@@ -495,18 +676,52 @@ impl<I: Interface, R: RngCore, const N: usize, const S: usize> Profile for NoStd
     }
 }
 
-/// Frame processor for `NoStdRouter` profile.
+// ---------------------------------------------------------------------------
+// Convenience constructors for std
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "std")]
+impl<I: Interface, const N: usize, const S: usize> Router<I, rand::rngs::StdRng, N, S> {
+    /// Create a new root router using a randomly-seeded StdRng (Send + Sync).
+    pub fn new_std() -> Self {
+        use rand::SeedableRng;
+        Self::new(rand::rngs::StdRng::from_os_rng())
+    }
+
+    /// Create a new bridge router with upstream, using a randomly-seeded StdRng.
+    pub fn new_bridge_std(upstream_sink: I::Sink) -> Self {
+        use rand::SeedableRng;
+        Self::new_bridge(rand::rngs::StdRng::from_os_rng(), upstream_sink)
+    }
+}
+
+#[cfg(feature = "std")]
+impl<I: Interface, const N: usize, const S: usize> Default for Router<I, rand::rngs::StdRng, N, S> {
+    fn default() -> Self {
+        Self::new_std()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FrameProcessor
+// ---------------------------------------------------------------------------
+
+/// Frame processor for the [`Router`] profile.
 ///
-/// Uses a pre-assigned `net_id` (from [`NoStdRouter::register_interface`])
-/// and does not perform net_id discovery.
+/// Uses a pre-assigned `net_id` and handles Inactive→Active transition
+/// on the first successfully received frame.
 pub struct RouterFrameProcessor {
     net_id: u16,
+    activated: bool,
 }
 
 impl RouterFrameProcessor {
     /// Create a new processor with a pre-assigned net_id.
     pub fn new(net_id: u16) -> Self {
-        Self { net_id }
+        Self {
+            net_id,
+            activated: false,
+        }
     }
 }
 
@@ -520,16 +735,56 @@ where
         nsh: &N,
         ident: <<N as crate::net_stack::NetStackHandle>::Profile as crate::interface_manager::Profile>::InterfaceIdent,
     ) -> bool {
-        process_frame(self.net_id, data, nsh, ident);
-        false // NoStdRouter doesn't do state transitions in process_frame
+        // Sync net_id from the stack if still at the pending placeholder (0).
+        // This handles the case where `reassign_interface_net_id` updated the
+        // slot after this processor was created with `RouterFrameProcessor::new(0)`.
+        if self.net_id == 0
+            && let Some(InterfaceState::Active { net_id, .. }) = nsh
+                .stack()
+                .manage_profile(|im| im.interface_state(ident.clone()))
+        {
+            self.net_id = net_id;
+        }
+
+        process_frame(self.net_id, data, nsh, ident.clone());
+
+        if !self.activated {
+            let changed = nsh.stack().manage_profile(|im| {
+                if matches!(
+                    im.interface_state(ident.clone()),
+                    Some(InterfaceState::Inactive)
+                ) {
+                    _ = im.set_interface_state(
+                        ident,
+                        InterfaceState::Active {
+                            net_id: self.net_id,
+                            node_id: CENTRAL_NODE_ID,
+                        },
+                    );
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                self.activated = true;
+            }
+            changed
+        } else {
+            false
+        }
     }
 
     fn reset(&mut self) {
-        // net_id is pre-assigned, nothing to reset
+        self.activated = false;
     }
 }
 
-/// Process one received frame for a `NoStdRouter` RX worker.
+// ---------------------------------------------------------------------------
+// Frame processing
+// ---------------------------------------------------------------------------
+
+/// Process one received frame for a Router RX worker.
 pub fn process_frame<N>(
     net_id: u16,
     data: &[u8],

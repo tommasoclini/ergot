@@ -36,13 +36,13 @@ where
     N: NetStackHandle,
     P: FrameProcessor<N>,
 {
-    pub(crate) nsh: N,
-    pub(crate) skt: Arc<UdpSocket>,
-    pub(crate) closer: Arc<WaitQueue>,
-    pub(crate) processor: P,
-    pub(crate) ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
-    pub(crate) liveness: Option<LivenessConfig>,
-    pub(crate) state_notify: Option<Arc<WaitQueue>>,
+    pub nsh: N,
+    pub skt: Arc<UdpSocket>,
+    pub closer: Arc<WaitQueue>,
+    pub processor: P,
+    pub ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
+    pub liveness: Option<LivenessConfig>,
+    pub state_notify: Option<Arc<WaitQueue>>,
 }
 
 /// Result of receiving a UDP datagram.
@@ -167,10 +167,10 @@ where
 /// On exit, calls `closer.close()` to ensure the RxWorker also
 /// shuts down.
 pub struct UdpTxWorker {
-    pub(crate) socket: Arc<UdpSocket>,
-    pub(crate) consumer: FramedConsumer<StdQueue>,
-    pub(crate) closer: Arc<WaitQueue>,
-    pub(crate) peer_rx: Option<watch::Receiver<Option<SocketAddr>>>,
+    pub socket: Arc<UdpSocket>,
+    pub consumer: FramedConsumer<StdQueue>,
+    pub closer: Arc<WaitQueue>,
+    pub peer_rx: Option<watch::Receiver<Option<SocketAddr>>>,
 }
 
 impl UdpTxWorker {
@@ -336,37 +336,40 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Registration: DirectRouter
+// Registration: Router
 // ---------------------------------------------------------------------------
 
-use crate::interface_manager::profiles::direct_router::{DirectRouter, RouterFrameProcessor};
+use crate::interface_manager::profiles::router::{Router, RouterFrameProcessor};
 use crate::interface_manager::utils::framed_stream::Sink;
 use crate::interface_manager::utils::std::new_std_queue;
+use rand_core::RngCore;
 
-/// Registration error for DirectRouter.
+/// Registration error for Router.
 #[derive(Debug, PartialEq)]
 pub struct RouterRegistrationError;
 
-/// Register a UDP transport on a [`DirectRouter`] profile.
+/// Register a UDP transport on a [`Router`] profile.
 ///
 /// Router always uses connected sockets, so no peer discovery is needed.
-pub async fn register_router<N, I>(
+pub async fn register_router<N, I, Rng, const M: usize, const SS: usize>(
     stack: N,
     socket: UdpSocket,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
     liveness: Option<LivenessConfig>,
     state_notify: Option<Arc<WaitQueue>>,
-) -> Result<u64, RouterRegistrationError>
+) -> Result<u8, RouterRegistrationError>
 where
     I: Interface<Sink = Sink<StdQueue>>,
-    N: NetStackHandle<Profile = DirectRouter<I>> + Send + 'static,
+    Rng: RngCore + Send + 'static,
+    N: NetStackHandle<Profile = Router<I, Rng, M, SS>> + Send + 'static,
 {
     let arc_socket = Arc::new(socket);
     let q: StdQueue = new_std_queue(outgoing_buffer_size);
     let res = stack.stack().manage_profile(|im| {
-        let ident =
-            im.register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))?;
+        let ident = im
+            .register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))
+            .ok()?;
         let state = im.interface_state(ident)?;
         match state {
             InterfaceState::Active { net_id, node_id: _ } => Some((ident, net_id)),

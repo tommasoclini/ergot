@@ -38,13 +38,13 @@ where
     N: NetStackHandle,
     P: FrameProcessor<N>,
 {
-    pub(crate) nsh: N,
-    pub(crate) biq: Queue<RequestBuffer>,
-    pub(crate) closer: Arc<WaitQueue>,
-    pub(crate) processor: P,
-    pub(crate) ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
-    pub(crate) mtu: u16,
-    pub(crate) state_notify: Option<Arc<WaitQueue>>,
+    pub nsh: N,
+    pub biq: Queue<RequestBuffer>,
+    pub closer: Arc<WaitQueue>,
+    pub processor: P,
+    pub ident: <<N as NetStackHandle>::Profile as Profile>::InterfaceIdent,
+    pub mtu: u16,
+    pub state_notify: Option<Arc<WaitQueue>>,
 }
 
 impl<N, P> NusbRxWorker<N, P>
@@ -158,10 +158,10 @@ where
 /// On exit, calls `closer.close()` to ensure the RxWorker also
 /// shuts down.
 pub struct NusbTxWorker {
-    pub(crate) boq: Queue<Vec<u8>>,
-    pub(crate) consumer: FramedConsumer<StdQueue>,
-    pub(crate) closer: Arc<WaitQueue>,
-    pub(crate) max_usb_frame_size: Option<usize>,
+    pub boq: Queue<Vec<u8>>,
+    pub consumer: FramedConsumer<StdQueue>,
+    pub closer: Arc<WaitQueue>,
+    pub max_usb_frame_size: Option<usize>,
 }
 
 impl NusbTxWorker {
@@ -230,11 +230,16 @@ pub struct EdgeRegistrationError;
 
 /// Register a nusb USB bulk transport on a [`DirectEdge`] profile.
 ///
-/// Sets the interface to `Inactive` and spawns RxWorker/TxWorker tasks.
+/// `initial_state` and `processor` control target vs controller mode:
+/// - Target: `InterfaceState::Inactive` with `EdgeFrameProcessor::new()`
+/// - Controller: `InterfaceState::Active { net_id: 1, node_id: 1 }` with
+///   `EdgeFrameProcessor::new_controller(1)`
 pub async fn register_edge<N, I>(
     stack: N,
     device: NewDevice,
     queue: StdQueue,
+    processor: EdgeFrameProcessor,
+    initial_state: InterfaceState,
     max_ergot_packet_size: u16,
     state_notify: Option<Arc<WaitQueue>>,
 ) -> Result<(), EdgeRegistrationError>
@@ -249,7 +254,7 @@ where
             _ => return Err(EdgeRegistrationError),
         }
         im.set_closer(closer.clone());
-        im.set_interface_state((), InterfaceState::Inactive)
+        im.set_interface_state((), initial_state)
             .map_err(|_| EdgeRegistrationError)?;
         Ok(())
     })?;
@@ -264,7 +269,7 @@ where
         nsh: stack,
         biq: device.biq,
         closer: closer.clone(),
-        processor: EdgeFrameProcessor::new(),
+        processor,
         ident: (),
         mtu: max_ergot_packet_size,
         state_notify,
@@ -297,33 +302,36 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Registration: DirectRouter
+// Registration: Router
 // ---------------------------------------------------------------------------
 
-use crate::interface_manager::profiles::direct_router::{DirectRouter, RouterFrameProcessor};
+use crate::interface_manager::profiles::router::{Router, RouterFrameProcessor};
 use crate::interface_manager::utils::framed_stream::Sink;
 use crate::interface_manager::utils::std::new_std_queue;
+use rand_core::RngCore;
 
-/// Registration error for DirectRouter.
+/// Registration error for Router.
 #[derive(Debug, PartialEq)]
 pub struct RouterRegistrationError;
 
-/// Register a nusb USB bulk transport on a [`DirectRouter`] profile.
-pub async fn register_router<N, I>(
+/// Register a nusb USB bulk transport on a [`Router`] profile.
+pub async fn register_router<N, I, Rng, const M: usize, const SS: usize>(
     stack: N,
     device: NewDevice,
     max_ergot_packet_size: u16,
     outgoing_buffer_size: usize,
     state_notify: Option<Arc<WaitQueue>>,
-) -> Result<u64, RouterRegistrationError>
+) -> Result<u8, RouterRegistrationError>
 where
     I: Interface<Sink = Sink<StdQueue>>,
-    N: NetStackHandle<Profile = DirectRouter<I>> + Send + 'static,
+    Rng: RngCore + Send + 'static,
+    N: NetStackHandle<Profile = Router<I, Rng, M, SS>> + Send + 'static,
 {
     let q: StdQueue = new_std_queue(outgoing_buffer_size);
     let res = stack.stack().manage_profile(|im| {
-        let ident =
-            im.register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))?;
+        let ident = im
+            .register_interface(Sink::new_from_handle(q.clone(), max_ergot_packet_size))
+            .ok()?;
         let state = im.interface_state(ident)?;
         match state {
             InterfaceState::Active { net_id, node_id: _ } => Some((ident, net_id)),
