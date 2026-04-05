@@ -142,7 +142,7 @@ impl<NS: NetStackHandle> Topics<NS> {
     ) -> Result<(), NetStackSendError>
     where
         T: Topic,
-        T::Message: Clone + DeserializeOwned + 'static,
+        T::Message: Clone + 'static,
     {
         let hdr = Header {
             src: Address {
