@@ -84,7 +84,7 @@ impl<NS: NetStackHandle> Services<NS> {
 
     /// Handler for unicast log messages that calls the given function for each received
     /// log message
-    #[cfg(feature = "std")]
+    #[cfg(feature = "tokio-std")]
     pub async fn generic_log_handler_unicast<F>(
         self,
         depth: usize,
@@ -119,7 +119,7 @@ impl<NS: NetStackHandle> Services<NS> {
 
     /// Handler for unicast log messages that prints to the `log` crate sink for
     /// each received log message
-    #[cfg(feature = "std")]
+    #[cfg(feature = "tokio-std")]
     pub async fn log_handler_unicast(
         self,
         depth: usize,
@@ -215,6 +215,7 @@ impl<NS: NetStackHandle> Services<NS> {
 }
 
 /// log an ergot fmt log to log's global logger
+#[cfg(feature = "std")]
 fn log_fmtlog(msg: HeaderMessage<ErgotFmtRxOwned>) {
     use crate::fmtlog;
     match msg.t.level {
